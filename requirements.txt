@@ -1,0 +1,4 @@
+# yt-dlp with its recommended extras:
+#   default  -> brotli, certifi, mutagen, pycryptodomex, requests, websockets, yt-dlp-ejs
+#   curl-cffi -> browser impersonation, needed by some sites
+yt-dlp[default,curl-cffi]
