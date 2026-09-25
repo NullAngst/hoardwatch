@@ -1,0 +1,121 @@
+name: Build and release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to release, for example v1.0.0. Leave blank to build test artifacts without a release."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest,   name: windows-x64 }
+          - { os: ubuntu-22.04,     name: linux-x64 }
+          - { os: ubuntu-22.04-arm, name: linux-arm64 }
+          - { os: macos-14,         name: macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pillow
+
+      - name: Stamp version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os, re
+          v = os.environ.get("VERSION", "").lstrip("v")
+          if re.fullmatch(r"\d+(\.\d+)*([.-]?[0-9A-Za-z]+)*", v):
+              p = "hoardwatch.py"
+              s = open(p, encoding="utf-8").read()
+              s = re.sub(r'^APP_VERSION = ".*"$', f'APP_VERSION = "{v}"', s, count=1, flags=re.M)
+              open(p, "w", encoding="utf-8").write(s)
+              print("Stamped version", v)
+          else:
+              print("No release version, keeping the version in the source")
+          PY
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then SEP=";"; ICON=assets/icon.ico; else SEP=":"; ICON=assets/icon.png; fi
+          # macOS wants a .app bundle (onedir). Windows and Linux get a single file.
+          if [ "$RUNNER_OS" = "macOS" ]; then MODE="--onedir"; else MODE="--onefile"; fi
+          pyinstaller --noconfirm --clean $MODE --windowed --name Hoardwatch \
+            --icon "$ICON" \
+            --add-data "assets/icon.png${SEP}assets" \
+            --add-data "assets/icon.ico${SEP}assets" \
+            --collect-all yt_dlp_ejs \
+            --osx-bundle-identifier io.github.nullangst.hoardwatch \
+            hoardwatch.py
+
+      - name: Smoke test
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then BIN=dist/Hoardwatch.app/Contents/MacOS/Hoardwatch; else BIN=dist/Hoardwatch; fi
+          "$BIN" --version
+          # --list loads yt-dlp, so this fails if it was not bundled correctly.
+          "$BIN" --list
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          case "$RUNNER_OS" in
+            Windows) cp dist/Hoardwatch.exe "out/Hoardwatch-${{ matrix.name }}.exe" ;;
+            Linux)   tar -czf "out/Hoardwatch-${{ matrix.name }}.tar.gz" -C dist Hoardwatch ;;
+            macOS)   ditto -c -k --keepParent dist/Hoardwatch.app "out/Hoardwatch-${{ matrix.name }}.zip" ;;
+          esac
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Hoardwatch-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          name: Hoardwatch ${{ inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: dist/*
