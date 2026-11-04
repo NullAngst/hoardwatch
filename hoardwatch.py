@@ -57,11 +57,30 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
+# PyInstaller points LD_LIBRARY_PATH at its bundled libraries. Child processes (ffmpeg, deno,
+# gallery-dl, xdg-open, the file manager) inherit it and can crash against the wrong libssl or
+# libstdc++. Put the user's original value back so only this process uses the bundled copies.
+if FROZEN and sys.platform.startswith("linux"):
+    _orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+    if _orig is not None:
+        os.environ["LD_LIBRARY_PATH"] = _orig
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+
 
 # =============================================================== paths
 
 def app_dir() -> str:
     return os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
+
+
+def install_dir() -> str:
+    """Folder the user sees the program in. Inside an AppImage, sys.executable lives in a
+    read-only mount, so use the folder holding the .AppImage file instead."""
+    appimage = os.environ.get("APPIMAGE")
+    if appimage and os.path.isfile(appimage):
+        return os.path.dirname(os.path.abspath(appimage))
+    return app_dir()
 
 
 def resource_path(*parts: str) -> str:
@@ -70,7 +89,7 @@ def resource_path(*parts: str) -> str:
 
 
 def _data_dir() -> str:
-    portable = os.path.join(app_dir(), "hoardwatch-data")
+    portable = os.path.join(install_dir(), "hoardwatch-data")
     if os.path.isdir(portable):
         return portable
     if IS_WIN:
@@ -411,6 +430,9 @@ DEFAULTS: dict = {
     # ui
     "verbose_log": False,
     "clipboard_watch": False,
+    "theme": "Hoardwatch",
+    "window_geometry": "",
+    "sash": 350,
 }
 
 
@@ -1770,61 +1792,183 @@ def scan_page(url: str, proxy: str | None) -> list[tuple[str, str]]:
 
 try:
     import tkinter as tk
+    import tkinter.font as tkfont
     from tkinter import filedialog, messagebox, ttk
     _Toplevel = tk.Toplevel
+    _Frame = ttk.Frame
 except Exception:  # headless systems without Tk can still use --check
     tk = None
-    _Toplevel = object
+    _Toplevel = _Frame = object
 
-PAL = {"bg": "#1b2330", "panel": "#222c3a", "field": "#2a3647", "fg": "#dfe6ee", "muted": "#8d9bb0",
-       "accent": "#c99a3f", "accent_hi": "#ddb25a", "sel": "#35506e", "border": "#33415a",
-       "ok": "#8cbf8f", "warn": "#d8b35e", "err": "#e0806f", "gone": "#c99a3f"}
+# Every theme defines the same keys. "on_accent" is text drawn on the accent color, "stripe" is
+# the background of every other table row.
+THEMES = {
+    "Hoardwatch": {"bg": "#1b2330", "panel": "#222c3a", "field": "#2a3647", "fg": "#dfe6ee",
+                   "muted": "#8d9bb0", "accent": "#c99a3f", "accent_hi": "#ddb25a", "on_accent": "#1b2330",
+                   "sel": "#35506e", "border": "#33415a", "stripe": "#263142", "ok": "#8cbf8f",
+                   "warn": "#d8b35e", "err": "#e0806f", "gone": "#c99a3f"},
+    "Light": {"bg": "#f3f3f3", "panel": "#ffffff", "field": "#ffffff", "fg": "#1f1f1f",
+              "muted": "#6b6b6b", "accent": "#2f6fbd", "accent_hi": "#3d82d6", "on_accent": "#ffffff",
+              "sel": "#cfe2f8", "border": "#c8c8c8", "stripe": "#f6f8fa", "ok": "#2e7d32",
+              "warn": "#9a6700", "err": "#c62828", "gone": "#b25e00"},
+    "Dark": {"bg": "#1e1e1e", "panel": "#252526", "field": "#2d2d30", "fg": "#e6e6e6",
+             "muted": "#9a9a9a", "accent": "#4a90d9", "accent_hi": "#63a4e8", "on_accent": "#ffffff",
+             "sel": "#264f78", "border": "#3c3c3c", "stripe": "#2a2a2b", "ok": "#7fbf7f",
+             "warn": "#d7ba7d", "err": "#f07a6a", "gone": "#d7a05a"},
+    "Verdigris": {"bg": "#16282a", "panel": "#1c3235", "field": "#243f3f", "fg": "#d9ece6",
+                  "muted": "#86aaa2", "accent": "#43b3a0", "accent_hi": "#5fc9b6", "on_accent": "#10201f",
+                  "sel": "#2e5b57", "border": "#2f4f4d", "stripe": "#20393b", "ok": "#8fd19e",
+                  "warn": "#d9b25f", "err": "#e07b67", "gone": "#c98a4b"},
+    "Kawaii Light": {"bg": "#fff4f8", "panel": "#ffffff", "field": "#ffeaf2", "fg": "#4a2c3d",
+                     "muted": "#a07890", "accent": "#ff7eb6", "accent_hi": "#ff99c6", "on_accent": "#ffffff",
+                     "sel": "#ffd0e4", "border": "#f5c2d7", "stripe": "#fff7fa", "ok": "#3f9c6d",
+                     "warn": "#b8860b", "err": "#d6455d", "gone": "#a35bc4",
+                     "fonts": ["M PLUS Rounded 1c", "Comfortaa", "Nunito", "Quicksand", "Varela Round"]},
+    "Kawaii Dark": {"bg": "#24182b", "panel": "#2d1f36", "field": "#3a2846", "fg": "#f6e6f2",
+                    "muted": "#b496b5", "accent": "#ff8fc8", "accent_hi": "#ffaad6", "on_accent": "#2a1530",
+                    "sel": "#5a3a6b", "border": "#4a3357", "stripe": "#33233d", "ok": "#9be3b5",
+                    "warn": "#f3cf7a", "err": "#ff7d8c", "gone": "#c9a0ff",
+                    "fonts": ["M PLUS Rounded 1c", "Comfortaa", "Nunito", "Quicksand", "Varela Round"]},
+}
+PAL: dict = dict(THEMES["Hoardwatch"])
 BROWSERS = ["", "firefox", "chrome", "chromium", "brave", "edge", "opera", "vivaldi", "safari", "whale"]
+TREE_TAGS = (("done", "ok"), ("failed", "err"), ("unavailable", "muted"), ("skipped", "muted"),
+             ("gone", "gone"), ("warn", "warn"), ("error", "err"), ("off", "muted"), ("ok", "ok"))
+FONTS: dict = {}
+_THEMED: list = []
+STATUS_WORDS = {"pending": "pending", "done": "saved", "failed": "failed", "unavailable": "unavailable",
+                "skipped": "skipped", "missed": "missed"}
+
+
+def ago(s: str | None) -> str:
+    d = parse_iso(s)
+    if not d:
+        return "never"
+    secs = (dt.datetime.now(dt.timezone.utc) - d).total_seconds()
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)} min ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)} h ago"
+    return short_ts(s)
+
+
+def _pick_family(wanted, fallback):
+    have = {f.lower(): f for f in tkfont.families()}
+    for w in wanted:
+        if w.lower() in have:
+            return have[w.lower()]
+    return fallback
+
+
+def init_fonts(root):
+    default = tkfont.nametofont("TkDefaultFont")
+    if IS_WIN:
+        fam, size, mono = "Segoe UI", 10, ["Consolas", "Cascadia Mono"]
+    elif IS_MAC:
+        fam, size, mono = default.actual("family"), 12, ["Menlo", "Monaco"]
+    else:
+        fam = _pick_family(["Noto Sans", "DejaVu Sans", "Liberation Sans", "Cantarell"], default.actual("family"))
+        size, mono = 10, ["Noto Sans Mono", "DejaVu Sans Mono", "Liberation Mono"]
+    fixed = tkfont.nametofont("TkFixedFont")
+    FONTS["family"] = fam
+    FONTS["base"] = tkfont.Font(root, family=fam, size=size)
+    FONTS["bold"] = tkfont.Font(root, family=fam, size=size, weight="bold")
+    FONTS["title"] = tkfont.Font(root, family=fam, size=size + 2, weight="bold")
+    FONTS["big"] = tkfont.Font(root, family=fam, size=size + 6, weight="bold")
+    FONTS["mono"] = tkfont.Font(root, family=_pick_family(mono, fixed.actual("family")), size=size - 1 if size > 9 else size)
+    FONTS["size"] = size
+    # Classic Tk widgets (menus, text boxes, entries, combobox lists) read these named fonts. Setting
+    # "*Font" in the option database instead would override every ttk style font.
+    for n in NAMED_FONTS:
+        tkfont.nametofont(n).configure(family=fam, size=size)
+
+
+NAMED_FONTS = ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkTooltipFont", "TkCaptionFont")
+
+
+def _set_family():
+    fam = _pick_family(PAL["fonts"], FONTS["family"]) if PAL.get("fonts") else FONTS["family"]
+    for k in ("base", "bold", "title", "big"):
+        FONTS[k].configure(family=fam)
+    for n in NAMED_FONTS:
+        tkfont.nametofont(n).configure(family=fam)
 
 
 def apply_theme(root):
     st = ttk.Style(root)
     st.theme_use("clam")
     P = PAL
-    base_font = ("Segoe UI", 10) if IS_WIN else ("SF Pro Text", 12) if IS_MAC else ("DejaVu Sans", 10)
-    root.option_add("*Font", base_font)
+    _set_family()
+    base = FONTS["base"]
     st.configure(".", background=P["bg"], foreground=P["fg"], fieldbackground=P["field"],
                  bordercolor=P["border"], lightcolor=P["panel"], darkcolor=P["panel"],
                  troughcolor=P["panel"], focuscolor=P["accent"], selectbackground=P["sel"],
-                 selectforeground=P["fg"], insertcolor=P["fg"], font=base_font)
+                 selectforeground=P["fg"], insertcolor=P["fg"], font=base)
     st.configure("TFrame", background=P["bg"])
     st.configure("Panel.TFrame", background=P["panel"])
+    st.configure("Bar.TFrame", background=P["panel"])
     st.configure("TLabel", background=P["bg"], foreground=P["fg"])
     st.configure("Muted.TLabel", foreground=P["muted"])
+    st.configure("Bar.TLabel", background=P["panel"], foreground=P["muted"])
     st.configure("Panel.TLabel", background=P["panel"])
-    st.configure("Title.TLabel", font=(base_font[0], base_font[1] + 3, "bold"))
+    st.configure("Title.TLabel", font=FONTS["title"])
+    st.configure("Big.TLabel", font=FONTS["big"])
+    st.configure("Link.TLabel", foreground=P["muted"])
+    st.configure("Ok.TLabel", foreground=P["ok"])
+    st.configure("Warn.TLabel", foreground=P["warn"])
+    st.configure("Err.TLabel", foreground=P["err"])
+    st.configure("Gone.TLabel", foreground=P["gone"])
+    st.configure("PanelBig.TLabel", background=P["panel"], font=FONTS["big"])
+    st.configure("PanelWarn.TLabel", background=P["panel"], foreground=P["warn"])
+    st.configure("Empty.TLabel", background=P["panel"], foreground=P["muted"], font=base)
     st.configure("TButton", background=P["field"], foreground=P["fg"], padding=(10, 4), borderwidth=1, width=-4,
                  bordercolor=P["border"], lightcolor=P["field"], darkcolor=P["field"])
-    st.map("TButton", background=[("active", P["sel"]), ("disabled", P["panel"])],
+    st.map("TButton", background=[("disabled", P["panel"]), ("active", P["sel"])],
+           foreground=[("disabled", P["muted"])], bordercolor=[("focus", P["accent"])])
+    st.configure("Accent.TButton", background=P["accent"], foreground=P["on_accent"], font=FONTS["bold"],
+                 lightcolor=P["accent"], darkcolor=P["accent"], bordercolor=P["accent"])
+    st.map("Accent.TButton", background=[("disabled", P["panel"]), ("active", P["accent_hi"])],
            foreground=[("disabled", P["muted"])])
-    st.configure("Accent.TButton", background=P["accent"], foreground="#1b2330")
-    st.map("Accent.TButton", background=[("active", P["accent_hi"]), ("disabled", P["panel"])])
+    st.configure("Stop.TButton", background=P["field"], foreground=P["err"])
+    st.map("Stop.TButton", background=[("disabled", P["panel"]), ("active", P["sel"])],
+           foreground=[("disabled", P["muted"])])
     st.configure("Treeview", background=P["panel"], fieldbackground=P["panel"], foreground=P["fg"],
-                 rowheight=24, borderwidth=0)
+                 rowheight=base.metrics("linespace") + 10, borderwidth=0, font=base)
     st.map("Treeview", background=[("selected", P["sel"])], foreground=[("selected", P["fg"])])
-    st.configure("Treeview.Heading", background=P["field"], foreground=P["muted"], relief="flat", padding=(6, 4))
+    st.configure("Treeview.Heading", background=P["field"], foreground=P["muted"], relief="flat",
+                 padding=(6, 5), font=FONTS["bold"])
     st.map("Treeview.Heading", background=[("active", P["sel"])])
     st.configure("TNotebook", background=P["bg"], borderwidth=0, tabmargins=(0, 4, 0, 0))
-    st.configure("TNotebook.Tab", background=P["panel"], foreground=P["muted"], padding=(14, 6), borderwidth=1,
-                 bordercolor=P["border"], lightcolor=P["panel"], darkcolor=P["panel"])
-    st.map("TNotebook.Tab", background=[("selected", P["field"])], foreground=[("selected", P["fg"])],
-           lightcolor=[("selected", P["field"])], bordercolor=[("selected", P["border"])])
+    st.configure("TNotebook.Tab", background=P["bg"], foreground=P["muted"], padding=(16, 7), borderwidth=1,
+                 bordercolor=P["border"], lightcolor=P["bg"], darkcolor=P["bg"])
+    st.map("TNotebook.Tab", background=[("selected", P["panel"]), ("active", P["field"])],
+           foreground=[("selected", P["fg"])], lightcolor=[("selected", P["panel"])],
+           bordercolor=[("selected", P["border"])], padding=[("selected", (16, 7))],
+           expand=[("selected", (0, 0, 0, 0))])
     for w in ("TEntry", "TSpinbox", "TCombobox"):
         st.configure(w, fieldbackground=P["field"], foreground=P["fg"], arrowcolor=P["fg"],
-                     background=P["field"], insertcolor=P["fg"])
+                     background=P["field"], insertcolor=P["fg"], bordercolor=P["border"],
+                     lightcolor=P["field"], darkcolor=P["field"])
+        st.map(w, bordercolor=[("focus", P["accent"])], lightcolor=[("focus", P["accent"])])
     st.map("TCombobox", fieldbackground=[("readonly", P["field"])], foreground=[("readonly", P["fg"])],
-           selectbackground=[("readonly", P["field"])], selectforeground=[("readonly", P["fg"])])
+           selectbackground=[("readonly", P["field"])], selectforeground=[("readonly", P["fg"])],
+           bordercolor=[("focus", P["accent"])])
     st.configure("TCheckbutton", background=P["bg"], foreground=P["fg"], indicatorbackground=P["field"],
-                 indicatorforeground=P["bg"])
-    st.map("TCheckbutton", background=[("active", P["bg"])], indicatorbackground=[("selected", P["accent"])])
+                 indicatorforeground=P["on_accent"], indicatorcolor=P["field"])
+    st.map("TCheckbutton", background=[("active", P["bg"])],
+           indicatorcolor=[("selected", P["accent"])], indicatorbackground=[("selected", P["accent"])])
+    st.configure("Bar.TCheckbutton", background=P["panel"])
+    st.map("Bar.TCheckbutton", background=[("active", P["panel"])])
     st.configure("TLabelframe", background=P["bg"], bordercolor=P["border"])
     st.configure("TLabelframe.Label", background=P["bg"], foreground=P["muted"])
     st.configure("TPanedwindow", background=P["bg"])
+    st.configure("Sash", background=P["border"], sashthickness=6, gripcount=0)
+    st.configure("TSeparator", background=P["border"], lightcolor=P["border"], darkcolor=P["border"],
+                 bordercolor=P["border"])
+    st.configure("Horizontal.TProgressbar", background=P["accent"], troughcolor=P["field"],
+                 bordercolor=P["border"], lightcolor=P["accent"], darkcolor=P["accent"], thickness=8)
     for sb in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
         st.configure(sb, background=P["field"], troughcolor=P["panel"], arrowcolor=P["muted"],
                      bordercolor=P["panel"], lightcolor=P["field"], darkcolor=P["field"], gripcount=0)
@@ -1832,34 +1976,224 @@ def apply_theme(root):
     root.option_add("*TCombobox*Listbox.background", P["field"])
     root.option_add("*TCombobox*Listbox.foreground", P["fg"])
     root.option_add("*TCombobox*Listbox.selectBackground", P["sel"])
+    root.option_add("*TCombobox*Listbox.selectForeground", P["fg"])
     root.configure(bg=P["bg"])
 
 
-def make_text(parent, height=6, **kw):
+def _style_widget(w, kind):
+    P = PAL
+    if kind == "text":
+        w.configure(bg=P["field"], fg=P["fg"], insertbackground=P["fg"], highlightbackground=P["border"],
+                    highlightcolor=P["accent"], selectbackground=P["sel"], selectforeground=P["fg"])
+        for tag, key in getattr(w, "_hw_tags", {}).items():
+            w.tag_configure(tag, foreground=P[key])
+    elif kind == "listbox":
+        w.configure(bg=P["field"], fg=P["fg"], selectbackground=P["sel"], selectforeground=P["fg"],
+                    highlightbackground=P["border"], highlightcolor=P["accent"])
+    elif kind == "menu":
+        w.configure(bg=P["field"], fg=P["fg"], activebackground=P["sel"], activeforeground=P["fg"],
+                    selectcolor=P["accent"], disabledforeground=P["muted"], relief="flat", borderwidth=1)
+    elif kind == "tree":
+        for tag, key in TREE_TAGS:
+            w.tag_configure(tag, foreground=P[key])
+        w.tag_configure("stripe", background=P["stripe"])
+    elif kind in ("toplevel", "canvas"):
+        w.configure(bg=P["bg"])
+
+
+def themed(w, kind):
+    _THEMED.append((w, kind))
+    _style_widget(w, kind)
+    return w
+
+
+def _walk(w):
+    yield w
+    for c in w.winfo_children():
+        yield from _walk(c)
+
+
+def retheme(root, name):
+    PAL.clear()
+    PAL.update(THEMES.get(name) or THEMES["Hoardwatch"])
+    apply_theme(root)
+    alive = []
+    for w, kind in _THEMED:
+        try:
+            if w.winfo_exists():
+                _style_widget(w, kind)
+                alive.append((w, kind))
+        except tk.TclError:
+            pass
+    _THEMED[:] = alive
+    # Combobox drop-down lists that already exist do not pick up option_add changes.
+    for w in _walk(root):
+        if w.winfo_class() == "TCombobox":
+            try:
+                pd = w.tk.call("ttk::combobox::PopdownWindow", w)
+                w.tk.call(f"{pd}.f.l", "configure", "-background", PAL["field"], "-foreground", PAL["fg"],
+                          "-selectbackground", PAL["sel"], "-selectforeground", PAL["fg"])
+            except tk.TclError:
+                pass
+
+
+def make_text(parent, height=6, mono=False, tags=None, **kw):
     kw.setdefault("wrap", "word")
-    t = tk.Text(parent, height=height, bg=PAL["field"], fg=PAL["fg"], insertbackground=PAL["fg"],
-                relief="flat", highlightthickness=1, highlightbackground=PAL["border"],
-                highlightcolor=PAL["accent"], selectbackground=PAL["sel"], padx=6, pady=4, **kw)
-    return t
+    t = tk.Text(parent, height=height, relief="flat", highlightthickness=1, padx=6, pady=4,
+                font=FONTS["mono"] if mono else FONTS["base"], undo=True, **kw)
+    t._hw_tags = tags or {}
+    return themed(t, "text")
 
 
-def make_tree(parent, cols: list[tuple[str, str, int]], selectmode="extended", height=10):
+def make_menu(parent):
+    return themed(tk.Menu(parent, tearoff=0), "menu")
+
+
+def _sort_key(v):
+    s = str(v).strip().rstrip("%")
+    try:
+        return (0, float(s), "")
+    except ValueError:
+        return (1, 0.0, str(v).lower())
+
+
+def restripe(tree):
+    for n, i in enumerate(tree.get_children("")):
+        tags = tuple(t for t in tree.item(i, "tags") if t != "stripe")
+        tree.item(i, tags=tags + (("stripe",) if n % 2 else ()))
+
+
+def sort_tree(tree, col=None):
+    """Click a heading to sort by it, click again to reverse. Re-applied after every refresh."""
+    st = getattr(tree, "_hw_sort", None)
+    if col is not None:
+        st = (col, not st[1]) if st and st[0] == col else (col, False)
+        tree._hw_sort = st
+    if st:
+        c, rev = st
+        rows = sorted(((tree.set(i, c), i) for i in tree.get_children("")),
+                      key=lambda r: _sort_key(r[0]), reverse=rev)
+        for n, (_v, i) in enumerate(rows):
+            tree.move(i, "", n)
+        for cid in tree["columns"]:
+            title = tree._hw_titles[cid]
+            tree.heading(cid, text=title + ((" \u25bc" if rev else " \u25b2") if cid == c else ""))
+    restripe(tree)
+
+
+def set_empty(tree, text):
+    """Show a centered hint over a table that has no rows."""
+    lab = getattr(tree, "_hw_empty", None)
+    if text and not tree.get_children(""):
+        if lab is None:
+            lab = ttk.Label(tree, style="Empty.TLabel", justify="center", anchor="center")
+            tree._hw_empty = lab
+        lab.configure(text=text, wraplength=max(260, tree.winfo_width() - 80))
+        lab.place(relx=0.5, rely=0.42, anchor="center")
+    elif lab is not None:
+        lab.place_forget()
+
+
+def make_tree(parent, cols: list[tuple[str, str, int]], selectmode="extended", height=10, stretch=None):
     frame = ttk.Frame(parent)
     tree = ttk.Treeview(frame, columns=[c[0] for c in cols], show="headings", selectmode=selectmode, height=height)
+    tree._hw_titles = {}
+    stretch = stretch or ("title", "url", "label", "name")
     for cid, title, width in cols:
-        tree.heading(cid, text=title, anchor="w")
-        tree.column(cid, width=width, minwidth=40, stretch=cid in ("title", "url", "label"), anchor="w")
+        tree._hw_titles[cid] = title
+        tree.heading(cid, text=title, anchor="w", command=lambda c=cid: sort_tree(tree, c))
+        tree.column(cid, width=width, minwidth=40, stretch=cid in stretch, anchor="w")
     ys = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=ys.set)
     tree.grid(row=0, column=0, sticky="nsew")
     ys.grid(row=0, column=1, sticky="ns")
     frame.rowconfigure(0, weight=1)
     frame.columnconfigure(0, weight=1)
-    for tag, color in (("done", PAL["ok"]), ("failed", PAL["err"]), ("unavailable", PAL["muted"]),
-                       ("skipped", PAL["muted"]), ("gone", PAL["gone"]), ("warn", PAL["warn"]),
-                       ("error", PAL["err"]), ("off", PAL["muted"])):
-        tree.tag_configure(tag, foreground=color)
+    themed(tree, "tree")
     return frame, tree
+
+
+class Tooltip:
+    def __init__(self, widget, text, delay=600):
+        self.w, self.text, self.delay = widget, text, delay
+        self.tip = self.job = None
+        widget.bind("<Enter>", self._sched, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _sched(self, _e=None):
+        self._hide()
+        self.job = self.w.after(self.delay, self._show)
+
+    def _show(self):
+        self.job = None
+        if self.tip or not self.w.winfo_viewable():
+            return
+        x = self.w.winfo_pointerx() + 14
+        y = self.w.winfo_rooty() + self.w.winfo_height() + 6
+        self.tip = tk.Toplevel(self.w)
+        self.tip.wm_overrideredirect(True)
+        self.tip.configure(bg=PAL["border"])
+        tk.Label(self.tip, text=self.text, justify="left", wraplength=360, bg=PAL["field"], fg=PAL["fg"],
+                 font=FONTS["base"], padx=8, pady=5).pack(padx=1, pady=1)
+        self.tip.wm_geometry(f"+{x}+{y}")
+
+    def _hide(self, _e=None):
+        if self.job:
+            self.w.after_cancel(self.job)
+            self.job = None
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
+def tip(widget, text):
+    Tooltip(widget, text)
+    return widget
+
+
+class ScrollFrame(_Frame):
+    """A frame that scrolls vertically once its content is taller than max_height."""
+
+    def __init__(self, parent, max_height=None, padding=12):
+        super().__init__(parent)
+        self.max_height = max_height or int(self.winfo_screenheight() * 0.6)
+        self.canvas = themed(tk.Canvas(self, highlightthickness=0, bd=0), "canvas")
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas, padding=padding)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner.bind("<Configure>", self._fit)
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
+        top = self.winfo_toplevel()
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            top.bind(seq, self._wheel, add="+")
+
+    def _fit(self, _e=None):
+        h = self.inner.winfo_reqheight()
+        self.canvas.configure(scrollregion=(0, 0, self.inner.winfo_reqwidth(), h),
+                              width=self.inner.winfo_reqwidth(), height=min(h, self.max_height))
+        if h > self.max_height:
+            self.vsb.pack(side="right", fill="y")
+        else:
+            self.vsb.pack_forget()
+
+    def _wheel(self, e):
+        w = self.winfo_containing(e.x_root, e.y_root)
+        me = str(self)
+        if w is None or not (str(w) == me or str(w).startswith(me + ".")) or not self.winfo_ismapped():
+            return
+        if self.inner.winfo_reqheight() <= self.canvas.winfo_height():
+            return
+        if getattr(e, "num", 0) == 4:
+            step = -3
+        elif getattr(e, "num", 0) == 5:
+            step = 3
+        else:
+            step = -int(e.delta / (1 if IS_MAC else 40)) or (-1 if e.delta > 0 else 1)
+        self.canvas.yview_scroll(step, "units")
+
 
 
 class Dialog(_Toplevel):
@@ -1867,33 +2201,45 @@ class Dialog(_Toplevel):
         super().__init__(parent)
         self.title(title)
         self.transient(parent)
-        self.configure(bg=PAL["bg"])
+        themed(self, "toplevel")
         self.result = None
-        self.body = ttk.Frame(self, padding=14)
+        self.body = ttk.Frame(self, padding=16)
         self.body.pack(fill="both", expand=True)
-        bar = ttk.Frame(self, padding=(14, 0, 14, 14))
+        ttk.Separator(self).pack(fill="x")
+        bar = ttk.Frame(self, padding=(16, 10, 16, 12))
         bar.pack(fill="x")
-        ttk.Button(bar, text="Cancel", command=self.destroy).pack(side="right")
+        self.bar = bar
+        ttk.Button(bar, text="Cancel" if ok_text else "Close", command=self.destroy).pack(side="right")
         if ok_text:
             ttk.Button(bar, text=ok_text, style="Accent.TButton", command=self._ok).pack(side="right", padx=(0, 8))
+            self.bind("<Return>", self._enter)
         self.bind("<Escape>", lambda e: self.destroy())
+
+    def _enter(self, _e):
+        # Return inside a multi-line box adds a line; it should not also submit the dialog.
+        if isinstance(self.focus_get(), tk.Text):
+            return
+        self._ok()
 
     def row(self, r, label, widget, hint=None, parent=None):
         parent = parent or self.body
-        ttk.Label(parent, text=label).grid(row=r * 2, column=0, sticky="nw", padx=(0, 12), pady=(6, 0))
-        widget.grid(row=r * 2, column=1, sticky="ew", pady=(6, 0))
+        ttk.Label(parent, text=label).grid(row=r * 2, column=0, sticky="nw", padx=(0, 14), pady=(8, 0))
+        widget.grid(row=r * 2, column=1, sticky="ew", pady=(8, 0))
         if hint:
-            ttk.Label(parent, text=hint, style="Muted.TLabel", wraplength=460, justify="left").grid(
-                row=r * 2 + 1, column=1, sticky="w")
+            ttk.Label(parent, text=hint, style="Muted.TLabel", wraplength=480, justify="left").grid(
+                row=r * 2 + 1, column=1, sticky="w", pady=(2, 0))
         parent.columnconfigure(1, weight=1)
 
     def show(self):
         self.update_idletasks()
         p = self.master
-        x = p.winfo_rootx() + max(0, (p.winfo_width() - self.winfo_reqwidth()) // 2)
-        y = p.winfo_rooty() + max(0, (p.winfo_height() - self.winfo_reqheight()) // 3)
-        self.geometry(f"+{x}+{y}")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(self.winfo_reqwidth(), sw - 40), min(self.winfo_reqheight(), sh - 80)
+        x = p.winfo_rootx() + max(0, (p.winfo_width() - w) // 2)
+        y = p.winfo_rooty() + max(0, (p.winfo_height() - h) // 3)
+        self.geometry(f"+{max(0, min(x, sw - w))}+{max(0, min(y, sh - h))}")
         self.grab_set()
+        self.focus_set()
         self.wait_window()
         return self.result
 
@@ -1913,7 +2259,7 @@ def path_entry(parent, var, directory=False, save=False):
 
     def browse():
         if directory:
-            p = filedialog.askdirectory(parent=parent)
+            p = filedialog.askdirectory(parent=parent, initialdir=var.get() or os.path.expanduser("~"))
         else:
             p = filedialog.askopenfilename(parent=parent)
         if p:
@@ -1924,7 +2270,7 @@ def path_entry(parent, var, directory=False, save=False):
 
 class ArchiveDialog(Dialog):
     def __init__(self, parent, app, db: ArchiveDB | None = None):
-        super().__init__(parent, "Edit archive" if db else "New archive")
+        super().__init__(parent, "Edit archive" if db else "New archive", ok_text="Save" if db else "Create")
         self.app, self.db = app, db
         s = db.settings() if db else {}
         self.v_name = tk.StringVar(value=s.get("name", ""))
@@ -1933,14 +2279,17 @@ class ArchiveDialog(Dialog):
         self.v_auth = tk.StringVar(value=s.get("default_auth", ""))
         self.v_tmpl = tk.StringVar(value=s.get("output_template", ""))
         self.v_extra = tk.StringVar(value=s.get("extra_ytdlp_args", ""))
-        self.row(0, "Name", ttk.Entry(self.body, textvariable=self.v_name, width=50))
+        e_name = ttk.Entry(self.body, textvariable=self.v_name, width=50)
+        self.row(0, "Name", e_name)
         pe = path_entry(self.body, self.v_path, directory=True)
         if db:
             for c in pe.winfo_children():
                 c.configure(state="disabled")
         self.row(1, "Folder", pe, "Downloads and the ledger (.hoardwatch) live here. Move the folder and "
-                                  "reopen it to keep the full history.")
-        self.row(2, "Auto-check every", ttk.Spinbox(self.body, from_=0, to=100000, textvariable=self.v_auto, width=8),
+                                  "reopen it to keep the full history." +
+                 ("" if db else " Leave blank to use a new folder named after the archive in ~/Hoardwatch."))
+        self.row(2, "Auto-check every", ttk.Spinbox(self.body, from_=0, to=100000, increment=15,
+                                                    textvariable=self.v_auto, width=8),
                  "Minutes. 0 turns it off. Runs while the app is open; use --check with cron or a "
                  "systemd timer for unattended runs.")
         self.row(3, "Default account", ttk.Combobox(self.body, textvariable=self.v_auth, state="readonly",
@@ -1950,12 +2299,17 @@ class ArchiveDialog(Dialog):
                  "Blank uses the global template from Settings.")
         self.row(5, "Extra yt-dlp arguments", ttk.Entry(self.body, textvariable=self.v_extra),
                  "Added after the global extra arguments, only for this archive.")
+        e_name.focus_set()
 
     def validate(self):
+        name = self.v_name.get().strip()
         path = self.v_path.get().strip()
-        if not path:
-            messagebox.showerror(APP_NAME, "Pick a folder.", parent=self)
-            return None
+        if not path and not self.db:
+            if not name:
+                messagebox.showerror(APP_NAME, "Give the archive a name or pick a folder.", parent=self)
+                return None
+            path = os.path.join(os.path.expanduser("~"), APP_NAME, safe_name(name))
+        path = os.path.expanduser(path)
         try:
             mins = int(float(self.v_auto.get() or 0))
         except ValueError:
@@ -1966,7 +2320,7 @@ class ArchiveDialog(Dialog):
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"Cannot use that folder: {exc}", parent=self)
             return None
-        return {"path": path, "name": self.v_name.get().strip() or os.path.basename(path.rstrip("/\\")),
+        return {"path": path, "name": name or os.path.basename(path.rstrip("/\\")),
                 "auto_check_minutes": max(0, mins), "default_auth": self.v_auth.get(),
                 "output_template": self.v_tmpl.get().strip(), "extra_ytdlp_args": self.v_extra.get().strip()}
 
@@ -1974,14 +2328,15 @@ class ArchiveDialog(Dialog):
 class SourceDialog(Dialog):
     BACKENDS = [("Automatic", "auto"), ("yt-dlp", "ytdlp"), ("gallery-dl", "gallerydl")]
 
-    def __init__(self, parent, app, src: dict | None = None):
-        super().__init__(parent, "Edit source" if src else "Add sources")
+    def __init__(self, parent, app, src: dict | None = None, urls: str = ""):
+        super().__init__(parent, "Edit source" if src else "Add sources", ok_text="Save" if src else "Add")
         self.src = src
         src = src or {}
-        self.t_urls = make_text(self.body, height=4 if not self.src else 2, width=60)
-        self.t_urls.insert("1.0", src.get("url", ""))
+        self.t_urls = make_text(self.body, height=5 if not self.src else 2, width=64)
+        self.t_urls.insert("1.0", src.get("url", "") or urls)
         self.row(0, "URL" if self.src else "URLs", self.t_urls,
-                 None if self.src else "One per line: channels, profiles, playlists or single posts.")
+                 None if self.src else "One per line, or paste any text and every link in it is used: "
+                                       "channels, profiles, playlists or single posts.")
         self.v_label = tk.StringVar(value=src.get("label", ""))
         self.v_sub = tk.StringVar(value=src.get("subdir", ""))
         self.v_backend = tk.StringVar(value={v: k for k, v in self.BACKENDS}.get(src.get("backend", "auto")))
@@ -1989,7 +2344,7 @@ class SourceDialog(Dialog):
         self.v_auth = tk.StringVar(value="Archive default" if auth == "" else "None" if auth == "-" else auth)
         self.v_enabled = tk.BooleanVar(value=bool(src.get("enabled", 1)))
         self.row(1, "Label", ttk.Entry(self.body, textvariable=self.v_label),
-                 "Blank builds one from the URL." if not self.src else None)
+                 "Blank builds one from the URL. Ignored when adding more than one URL." if not self.src else None)
         self.row(2, "Subfolder", ttk.Entry(self.body, textvariable=self.v_sub),
                  "Relative to the archive folder. Blank uses the label. Sources may share a subfolder.")
         self.row(3, "Backend", ttk.Combobox(self.body, textvariable=self.v_backend, state="readonly",
@@ -1999,6 +2354,7 @@ class SourceDialog(Dialog):
         self.row(4, "Account", ttk.Combobox(self.body, textvariable=self.v_auth, state="readonly",
                                            values=["Archive default", "None"] + sorted(app.cfg["auth_profiles"])))
         self.row(5, "", ttk.Checkbutton(self.body, text="Include in archive checks", variable=self.v_enabled))
+        self.t_urls.focus_set()
 
     def validate(self):
         urls = extract_urls(self.t_urls.get("1.0", "end"))
@@ -2006,7 +2362,7 @@ class SourceDialog(Dialog):
             messagebox.showerror(APP_NAME, "Enter at least one http(s) URL.", parent=self)
             return None
         a = self.v_auth.get()
-        return {"urls": urls[:1] if self.src else urls, "label": self.v_label.get().strip(),
+        return {"urls": urls[:1] if self.src else list(dict.fromkeys(urls)), "label": self.v_label.get().strip(),
                 "subdir": self.v_sub.get().strip(),
                 "backend": dict(self.BACKENDS)[self.v_backend.get()],
                 "auth": "" if a == "Archive default" else "-" if a == "None" else a,
@@ -2056,6 +2412,7 @@ SETTINGS_LAYOUT = {
         ("retries", "int", "Retries", "Network and fragment retries inside yt-dlp."),
     ],
 }
+SETTING_LABELS = {k: lab for fields in SETTINGS_LAYOUT.values() for k, _kind, lab, _h in fields}
 
 
 class SettingsDialog(Dialog):
@@ -2067,21 +2424,22 @@ class SettingsDialog(Dialog):
         nb = ttk.Notebook(self.body)
         nb.pack(fill="both", expand=True)
         for tab, fields in SETTINGS_LAYOUT.items():
-            outer = ttk.Frame(nb, padding=12)
-            nb.add(outer, text=tab)
+            sf = ScrollFrame(nb)
+            nb.add(sf, text=tab)
+            outer = sf.inner
             for i, (key, kind, label, hint) in enumerate(fields):
                 val = self.cfg[key]
                 if kind == "bool":
                     v = tk.BooleanVar(value=bool(val))
                     w = ttk.Checkbutton(outer, text=label, variable=v)
-                    w.grid(row=i * 2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+                    w.grid(row=i * 2, column=0, columnspan=2, sticky="w", pady=(8, 0))
                     if hint:
                         ttk.Label(outer, text=hint, style="Muted.TLabel").grid(row=i * 2 + 1, column=0, columnspan=2,
-                                                                              sticky="w", padx=(24, 0))
+                                                                              sticky="w", padx=(26, 0))
                     self.vars[key] = (kind, v)
                     continue
                 if kind == "text":
-                    w = make_text(outer, height=3, width=60)
+                    w = make_text(outer, height=3, width=60, mono=True)
                     w.insert("1.0", val or "")
                     self.vars[key] = (kind, w)
                 else:
@@ -2089,17 +2447,21 @@ class SettingsDialog(Dialog):
                     self.vars[key] = (kind, v)
                     if kind in ("int", "float"):
                         w = ttk.Frame(outer)
-                        ttk.Entry(w, textvariable=v, width=10).pack(side="left")
+                        ttk.Spinbox(w, textvariable=v, width=10, from_=0, to=1_000_000,
+                                    increment=1 if kind == "int" else 0.5).pack(side="left")
                     else:
                         w = ttk.Entry(outer, textvariable=v, width=50)
                 self.row(i, label, w, hint, parent=outer)
         self._proxy_tab(nb)
         self._accounts_tab(nb)
+        if 0 <= app.settings_tab < len(nb.tabs()):
+            nb.select(app.settings_tab)
+        nb.bind("<<NotebookTabChanged>>", lambda e: setattr(app, "settings_tab", nb.index("current")))
 
     def _proxy_tab(self, nb):
         f = ttk.Frame(nb, padding=12)
         nb.add(f, text="Proxies")
-        self.t_proxies = make_text(f, height=7, width=60)
+        self.t_proxies = make_text(f, height=6, width=60, mono=True, wrap="none")
         self.t_proxies.insert("1.0", "\n".join(self.cfg["proxies"]))
         self.row(0, "Proxy list", self.t_proxies,
                  "One per line. socks5h://host:1080 resolves DNS through the proxy; use it to avoid DNS "
@@ -2116,12 +2478,13 @@ class SettingsDialog(Dialog):
                  "Leave off if your real IP must never be used. Note that ffmpeg-driven downloads "
                  "(some live streams) do not go through SOCKS.", parent=f)
         self.v_ptest = tk.StringVar(value=self.cfg["proxy_test_url"])
-        self.row(3, "Test URL", ttk.Entry(f, textvariable=self.v_ptest), parent=f)
         bar = ttk.Frame(f)
-        ttk.Button(bar, text="Test proxies", command=self._test).pack(side="left")
-        self.row(4, "", bar, parent=f)
-        self.t_ptest = make_text(f, height=5, width=60)
-        self.row(5, "Results", self.t_ptest, parent=f)
+        ttk.Entry(bar, textvariable=self.v_ptest).pack(side="left", fill="x", expand=True)
+        ttk.Button(bar, text="Test proxies", command=self._test).pack(side="left", padx=(6, 0))
+        self.row(3, "Test URL", bar, parent=f)
+        self.t_ptest = make_text(f, height=5, width=60, mono=True, wrap="none",
+                                 tags={"ok": "ok", "error": "err"})
+        self.row(4, "Results", self.t_ptest, parent=f)
 
     def _test(self):
         proxies = [p.strip() for p in self.t_proxies.get("1.0", "end").splitlines()
@@ -2143,10 +2506,10 @@ class SettingsDialog(Dialog):
                         info = ", ".join(f"{k}={j[k]}" for k in ("ip", "country", "city", "mullvad_exit_ip") if k in j)
                     except ValueError:
                         info = data[:80]
-                    line = f"OK    {p}  {int((time.time() - t) * 1000)} ms  {info}"
+                    line, tag = f"OK    {p}  {int((time.time() - t) * 1000)} ms  {info}", "ok"
                 except Exception as exc:
-                    line = f"FAIL  {p}  {clean_msg(exc)[:160]}"
-                self.app.emit("proxy_test", widget=self.t_ptest, line=line)
+                    line, tag = f"FAIL  {p}  {clean_msg(exc)[:160]}", "error"
+                self.app.emit("proxy_test", widget=self.t_ptest, line=line, tag=tag)
         threading.Thread(target=work, daemon=True).start()
 
     def _accounts_tab(self, nb):
@@ -2154,9 +2517,9 @@ class SettingsDialog(Dialog):
         nb.add(f, text="Accounts")
         self.profiles = json.loads(json.dumps(self.cfg["auth_profiles"]))
         left = ttk.Frame(f)
-        left.grid(row=0, column=0, sticky="ns", padx=(0, 12))
-        self.lb = tk.Listbox(left, width=22, height=12, bg=PAL["field"], fg=PAL["fg"], relief="flat",
-                             selectbackground=PAL["sel"], highlightthickness=0, exportselection=False)
+        left.grid(row=0, column=0, sticky="ns", padx=(0, 14))
+        self.lb = themed(tk.Listbox(left, width=22, height=12, relief="flat", highlightthickness=1,
+                                    exportselection=False, activestyle="none"), "listbox")
         self.lb.pack(fill="y", expand=True)
         self.lb.bind("<<ListboxSelect>>", lambda e: self._load_profile())
         b = ttk.Frame(left)
@@ -2180,13 +2543,21 @@ class SettingsDialog(Dialog):
         self.row(4, "Password", ttk.Entry(form, textvariable=self.a_pass, show="*"),
                  "Stored in plain text in config.json (mode 600 on Linux and macOS). Cookies are the "
                  "safer and more widely supported option.", parent=form)
-        ttk.Button(form, text="Save account", command=self._save_profile).grid(row=10, column=1, sticky="w", pady=10)
+        bar = ttk.Frame(form)
+        bar.grid(row=10, column=1, sticky="w", pady=10)
+        ttk.Button(bar, text="Save account", command=self._save_profile).pack(side="left")
+        self.l_acct = ttk.Label(bar, text="", style="Muted.TLabel")
+        self.l_acct.pack(side="left", padx=10)
+        ttk.Label(form, text="Unsaved account edits are kept when you press Save at the bottom.",
+                  style="Muted.TLabel").grid(row=11, column=1, sticky="w")
         self._fill_lb()
 
-    def _fill_lb(self):
+    def _fill_lb(self, select=None):
         self.lb.delete(0, "end")
-        for n in sorted(self.profiles):
+        for i, n in enumerate(sorted(self.profiles)):
             self.lb.insert("end", n)
+            if n == select:
+                self.lb.selection_set(i)
 
     def _load_profile(self):
         sel = self.lb.curselection()
@@ -2199,24 +2570,31 @@ class SettingsDialog(Dialog):
         self.a_browser.set(p.get("cookies_browser", ""))
         self.a_user.set(p.get("username", ""))
         self.a_pass.set(p.get("password", ""))
+        self.l_acct.configure(text="")
 
     def _new_profile(self):
         for v in (self.a_name, self.a_cookies, self.a_browser, self.a_user, self.a_pass):
             v.set("")
         self.lb.selection_clear(0, "end")
+        self.l_acct.configure(text="")
 
-    def _save_profile(self):
+    def _form_profile(self) -> dict:
+        return {"cookies_file": self.a_cookies.get().strip(), "cookies_browser": self.a_browser.get().strip(),
+                "username": self.a_user.get().strip(), "password": self.a_pass.get()}
+
+    def _save_profile(self, quiet=False) -> bool:
         n = self.a_name.get().strip()
         if not n or n == "-":
-            messagebox.showerror(APP_NAME, "Give the account a name.", parent=self)
-            return
+            if not quiet:
+                messagebox.showerror(APP_NAME, "Give the account a name.", parent=self)
+            return False
         sel = self.lb.curselection()
         if sel and self.lb.get(sel[0]) != n:
             self.profiles.pop(self.lb.get(sel[0]), None)
-        self.profiles[n] = {"cookies_file": self.a_cookies.get().strip(),
-                            "cookies_browser": self.a_browser.get().strip(),
-                            "username": self.a_user.get().strip(), "password": self.a_pass.get()}
-        self._fill_lb()
+        self.profiles[n] = self._form_profile()
+        self._fill_lb(select=n)
+        self.l_acct.configure(text=f"Saved {n}")
+        return True
 
     def _del_profile(self):
         sel = self.lb.curselection()
@@ -2226,6 +2604,10 @@ class SettingsDialog(Dialog):
             self._new_profile()
 
     def validate(self):
+        # Pressing Save with a filled-in account form should not silently drop the account.
+        n = self.a_name.get().strip()
+        if n and n != "-" and self.profiles.get(n) != self._form_profile():
+            self._save_profile(quiet=True)
         out = {}
         for key, (kind, v) in self.vars.items():
             try:
@@ -2240,7 +2622,7 @@ class SettingsDialog(Dialog):
                 else:
                     out[key] = v.get().strip()
             except ValueError:
-                messagebox.showerror(APP_NAME, f"{key} must be a number.", parent=self)
+                messagebox.showerror(APP_NAME, f"{SETTING_LABELS.get(key, key)} must be a number.", parent=self)
                 return None
         out["concurrency"] = max(1, out["concurrency"])
         out["item_delay_max"] = max(out["item_delay_min"], out["item_delay_max"])
@@ -2269,32 +2651,41 @@ class ToolsDialog(Dialog):
         self.app = app
         self.labels = {}
         self.paths = {}
+        self.busy = 0
         ttk.Label(self.body, text="yt-dlp", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         self.l_yt = ttk.Label(self.body, text="")
         self.l_yt.grid(row=0, column=1, sticky="w", padx=10)
         yb = ttk.Frame(self.body)
         yb.grid(row=0, column=2, sticky="e")
-        ttk.Button(yb, text="Update", command=self._upd_ytdlp).pack(side="left")
-        ttk.Button(yb, text="Use bundled", command=self._reset_ytdlp).pack(side="left", padx=(6, 0))
+        tip(ttk.Button(yb, text="Update", command=self._upd_ytdlp),
+            "Install the newest yt-dlp from PyPI into the data folder. Try this first when a site stops working.").pack(side="left")
+        tip(ttk.Button(yb, text="Use bundled", command=self._reset_ytdlp),
+            "Remove the installed update and go back to the yt-dlp built into this release.").pack(side="left", padx=(6, 0))
+        ttk.Label(self.body, text="Site extractors, updated separately from Hoardwatch. Restart after updating.",
+                  style="Muted.TLabel").grid(row=1, column=1, columnspan=2, sticky="w", padx=10)
         for i, (name, desc) in enumerate(self.TOOLS, start=1):
-            ttk.Label(self.body, text=name, style="Title.TLabel").grid(row=i * 3, column=0, sticky="w", pady=(14, 0))
-            lab = ttk.Label(self.body, text="")
-            lab.grid(row=i * 3, column=1, sticky="w", padx=10, pady=(14, 0))
+            ttk.Separator(self.body).grid(row=i * 4 - 1, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+            ttk.Label(self.body, text=name, style="Title.TLabel").grid(row=i * 4, column=0, sticky="w", pady=(10, 0))
+            lab = ttk.Label(self.body, text="checking...", style="Muted.TLabel")
+            lab.grid(row=i * 4, column=1, sticky="w", padx=10, pady=(10, 0))
             self.labels[name] = lab
             ttk.Button(self.body, text="Install or update",
-                       command=lambda n=name: self._install(n)).grid(row=i * 3, column=2, sticky="e", pady=(14, 0))
-            ttk.Label(self.body, text=desc, style="Muted.TLabel").grid(row=i * 3 + 1, column=1, columnspan=2, sticky="w", padx=10)
+                       command=lambda n=name: self._install(n)).grid(row=i * 4, column=2, sticky="e", pady=(10, 0))
+            ttk.Label(self.body, text=desc, style="Muted.TLabel").grid(row=i * 4 + 1, column=1, columnspan=2,
+                                                                       sticky="w", padx=10)
             v = tk.StringVar(value=app.cfg[TOOL_KEYS[name]])
             self.paths[name] = v
             pf = path_entry(self.body, v)
-            pf.grid(row=i * 3 + 2, column=1, columnspan=2, sticky="ew", padx=10)
-            ttk.Label(self.body, text="Custom path", style="Muted.TLabel").grid(row=i * 3 + 2, column=0, sticky="w")
+            pf.grid(row=i * 4 + 2, column=1, columnspan=2, sticky="ew", padx=10, pady=(4, 0))
+            ttk.Label(self.body, text="Custom path", style="Muted.TLabel").grid(row=i * 4 + 2, column=0, sticky="w")
         self.body.columnconfigure(1, weight=1)
         bar = ttk.Frame(self.body)
         bar.grid(row=20, column=0, columnspan=3, sticky="ew", pady=(14, 0))
-        ttk.Button(bar, text="Save paths", command=self._save_paths).pack(side="left")
+        tip(ttk.Button(bar, text="Save paths", command=self._save_paths),
+            "Use the paths typed above. Leave a path blank to use the installed copy or one found on PATH.").pack(side="left")
         ttk.Button(bar, text="Open tools folder", command=lambda: open_path(TOOLS_DIR)).pack(side="left", padx=6)
-        self.t_log = make_text(self.body, height=6, width=80)
+        self.pb = ttk.Progressbar(bar, mode="indeterminate", length=140)
+        self.t_log = make_text(self.body, height=7, width=84, mono=True, wrap="none")
         self.t_log.grid(row=21, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         self.refresh()
 
@@ -2306,19 +2697,30 @@ class ToolsDialog(Dialog):
             res = {}
             for n, _ in self.TOOLS:
                 p = tool_path(cfg, n)
-                res[n] = f"{tool_version(p, n)}  [{p}]" if p else "not found"
+                res[n] = (f"{tool_version(p, n)}  [{p}]", True) if p else ("not found", False)
             self.app.emit("tools_status", dialog=self, res=res)
         threading.Thread(target=work, daemon=True).start()
 
     def set_status(self, res):
-        for n, text in res.items():
+        for n, (text, ok) in res.items():
             if n in self.labels and self.labels[n].winfo_exists():
-                self.labels[n].configure(text=text[:110])
+                self.labels[n].configure(text=text[:110], style="TLabel" if ok else "Warn.TLabel")
 
     def log(self, msg):
         self.app.emit("tools_log", dialog=self, msg=msg)
 
+    def set_busy(self, delta):
+        self.busy = max(0, self.busy + delta)
+        if self.busy:
+            self.pb.pack(side="right")
+            self.pb.start(12)
+        else:
+            self.pb.stop()
+            self.pb.pack_forget()
+
     def _run(self, fn):
+        self.set_busy(1)
+
         def work():
             try:
                 fn()
@@ -2349,6 +2751,7 @@ class ToolsDialog(Dialog):
         for n, v in self.paths.items():
             self.app.cfg[TOOL_KEYS[n]] = v.get().strip()
         self.app.cfg.save()
+        self.log("Paths saved.")
         self.refresh()
 
 
@@ -2407,6 +2810,10 @@ class JobRunner:
                 self.app.emit("runner_state")
 
 
+TAB_SOURCES, TAB_ITEMS, TAB_GRABBER, TAB_ACTIVITY = range(4)
+FINISHED_STATES = ("done", "failed", "unavailable", "skipped", "stopped")
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -2416,14 +2823,22 @@ class App:
         self.db_lock = threading.Lock()
         self.sel_path: str | None = None
         self.tasks: dict[int, str] = {}
+        self.active: set = set()
+        self.finished: set = set()
+        self.settings_tab = 0
         self.dirty: set = set()
         self._last_items_refresh = 0.0
         self._last_clip = ""
+        self._search_job = None
         self.source_ids: dict[str, int] = {}
 
         root.title(f"{APP_NAME} {APP_VERSION}")
-        root.geometry("1280x800")
-        root.minsize(960, 600)
+        geo = re.match(r"^(\d{3,5})x(\d{3,5})", self.cfg["window_geometry"] or "")
+        root.geometry(f"{geo.group(1)}x{geo.group(2)}" if geo else "1280x800")
+        root.minsize(980, 620)
+        PAL.clear()
+        PAL.update(THEMES.get(self.cfg["theme"]) or THEMES["Hoardwatch"])
+        init_fonts(root)
         apply_theme(root)
         self._set_icon()
         self._build()
@@ -2438,6 +2853,8 @@ class App:
         if YTDLP_LOAD_ERROR:
             self.log("warn", f"yt-dlp update could not be loaded: {YTDLP_LOAD_ERROR}")
         self._startup_tool_check()
+        self._set_busy(False)
+        self.root.after(300, lambda: (set_empty(self.t_tasks, "No downloads running."), self._links_changed()))
 
     # ---- infrastructure
     def emit(self, event, **data):
@@ -2474,6 +2891,7 @@ class App:
                 self.emit("log", level="warn", msg="Not found: " + ", ".join(missing) +
                           ". Open Tools to install. Without ffmpeg, yt-dlp falls back to lower quality "
                           "single-file formats; without deno, many YouTube formats are unavailable.")
+                self.emit("tools_missing", names=missing)
             if not tool_path(cfg, "gallery-dl"):
                 self.emit("log", level="info", msg="gallery-dl not found. It is optional; Instagram and X "
                           "profiles usually need it.")
@@ -2481,72 +2899,244 @@ class App:
 
     # ---- layout
     def _build(self):
-        top = ttk.Frame(self.root, padding=(10, 8))
+        self._build_menu()
+        top = ttk.Frame(self.root, padding=(10, 8), style="Bar.TFrame")
         top.pack(fill="x")
-        self.b_check = ttk.Button(top, text="Check archive", style="Accent.TButton", command=self.check_selected_archive)
+        self.b_check = tip(ttk.Button(top, text="Check archive", style="Accent.TButton",
+                                      command=self.check_selected_archive),
+                           "List every source in the selected archive and download whatever is missing. Ctrl+R")
         self.b_check.pack(side="left")
-        ttk.Button(top, text="Check all archives", command=self.check_all).pack(side="left", padx=(6, 0))
-        self.b_stop = ttk.Button(top, text="Stop", command=self.stop)
+        tip(ttk.Button(top, text="Scan only", command=self.scan_archive),
+            "List every source and update the ledger without downloading. Cheap way to record "
+            "deletions often. Ctrl+Shift+S").pack(side="left", padx=(6, 0))
+        tip(ttk.Button(top, text="Check all", command=self.check_all),
+            "Queue a check for every archive in the list. Ctrl+Shift+R").pack(side="left", padx=(6, 0))
+        self.b_stop = tip(ttk.Button(top, text="Stop", style="Stop.TButton", command=self.stop),
+                          "Cancel the running check and anything queued. Partial files resume next time.")
         self.b_stop.pack(side="left", padx=(6, 0))
-        ttk.Button(top, text="Tools", command=lambda: ToolsDialog(self.root, self).show()).pack(side="right")
-        ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right", padx=(0, 6))
-        self.l_state = ttk.Label(top, text="Idle", style="Muted.TLabel")
+        self.pb = ttk.Progressbar(top, mode="indeterminate", length=110)
+        self.l_state = ttk.Label(top, text="Idle", style="Bar.TLabel")
         self.l_state.pack(side="left", padx=14)
+        self.b_tools = tip(ttk.Button(top, text="Tools", command=self.open_tools),
+                           "Install or update ffmpeg, deno and gallery-dl, and update yt-dlp.")
+        self.b_tools.pack(side="right")
+        tip(ttk.Button(top, text="Settings", command=self.open_settings),
+            "Downloads, tracking, rate limits, proxies and accounts. Ctrl+,").pack(side="right", padx=(0, 6))
 
-        pw = ttk.PanedWindow(self.root, orient="horizontal")
-        pw.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.root.after(80, lambda: pw.sashpos(0, 330))
+        sb = ttk.Frame(self.root, padding=(10, 2, 10, 6))
+        sb.pack(side="bottom", fill="x")
+        self.status = ttk.Label(sb, text="", style="Muted.TLabel")
+        self.status.pack(side="left")
+        self.l_data = ttk.Label(sb, text=f"Data: {DATA_DIR}", style="Link.TLabel", cursor="hand2")
+        self.l_data.pack(side="right")
+        self.l_data.bind("<Button-1>", lambda e: open_path(DATA_DIR))
+        tip(self.l_data, "Settings, accounts, installed tools and yt-dlp updates. Click to open.")
+        self.pw = ttk.PanedWindow(self.root, orient="horizontal")
+        self.pw.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        sash = int(self.cfg["sash"] or 350)
+        self.root.after(80, lambda: self.pw.sashpos(0, max(220, min(sash, 520))))
 
-        left = ttk.Frame(pw)
-        pw.add(left, weight=1)
-        ttk.Label(left, text="Archives", style="Title.TLabel").pack(anchor="w", pady=(0, 6))
-        f, self.t_arch = make_tree(left, [("name", "Name", 110), ("items", "Items", 55),
-                                          ("pending", "Missing", 72), ("gone", "Deleted", 72)],
+        left = ttk.Frame(self.pw)
+        self.pw.add(left, weight=1)
+        hdr = ttk.Frame(left)
+        hdr.pack(fill="x", pady=(0, 6))
+        ttk.Label(hdr, text="Archives", style="Title.TLabel").pack(side="left")
+        f, self.t_arch = make_tree(left, [("name", "Name", 170), ("pending", "Missing", 78),
+                                          ("gone", "Deleted", 78)],
                                    selectmode="browse")
-        self.t_arch.column("name", stretch=True)
         f.pack(fill="both", expand=True)
         self.t_arch.bind("<<TreeviewSelect>>", lambda e: self.on_archive_select())
+        self.t_arch.bind("<Double-1>", lambda e: self.edit_archive() if self.t_arch.identify_row(e.y) else None)
+        self.t_arch.bind("<Button-3>", self._arch_menu)
+        self.t_arch.bind("<Delete>", lambda e: self.remove_archive())
+        self.m_arch = make_menu(self.root)
+        self.m_arch.add_command(label="Check archive", command=self.check_selected_archive)
+        self.m_arch.add_command(label="Scan only", command=self.scan_archive)
+        self.m_arch.add_separator()
+        self.m_arch.add_command(label="Edit...", command=self.edit_archive)
+        self.m_arch.add_command(label="Show folder", command=self.open_archive_folder)
+        self.m_arch.add_command(label="Open check logs", command=self.open_logs)
+        self.m_arch.add_separator()
+        self.m_arch.add_command(label="Remove from list...", command=self.remove_archive)
         bar = ttk.Frame(left)
         bar.pack(fill="x", pady=(6, 0))
-        for i, (text, cmd) in enumerate((("New", self.new_archive), ("Open", self.open_archive),
-                                         ("Edit", self.edit_archive), ("Remove", self.remove_archive),
-                                         ("Folder", self.open_archive_folder))):
-            ttk.Button(bar, text=text, command=cmd).grid(row=i // 3, column=i % 3, sticky="ew", padx=(0, 6), pady=(0, 6))
-        for c in range(3):
-            bar.columnconfigure(c, weight=1, uniform="archbtn")
+        for i, (text, cmd, hint) in enumerate((
+                ("New", self.new_archive, "Create an archive in a new or empty folder. Ctrl+N"),
+                ("Open", self.open_archive, "Add an existing archive folder to the list. Ctrl+O"),
+                ("Edit", self.edit_archive, "Name, auto-check interval, default account and per-archive "
+                                            "yt-dlp options. Right-click an archive for more."))):
+            tip(ttk.Button(bar, text=text, command=cmd), hint).grid(row=0, column=i, sticky="ew",
+                                                                     padx=(0 if i == 0 else 6, 0))
+            bar.columnconfigure(i, weight=1, uniform="archbtn")
 
-        right = ttk.Frame(pw)
-        pw.add(right, weight=4)
+        right = ttk.Frame(self.pw)
+        self.pw.add(right, weight=4)
+        self.right = right
+        head = ttk.Frame(right, padding=(2, 0, 2, 8))
+        head.pack(fill="x")
+        self.l_title = ttk.Label(head, text="", style="Big.TLabel")
+        self.l_title.grid(row=0, column=0, sticky="w")
+        self.l_path = ttk.Label(head, text="", style="Link.TLabel", cursor="hand2")
+        self.l_path.grid(row=1, column=0, sticky="w")
+        self.l_path.bind("<Button-1>", lambda e: self.open_archive_folder())
+        tip(self.l_path, "Click to open the archive folder in your file manager")
+        stats = ttk.Frame(head)
+        stats.grid(row=0, column=1, rowspan=2, sticky="e")
+        head.columnconfigure(0, weight=1)
+        self.stat_labels = {}
+        for key, style in (("n", "TLabel"), ("done", "Ok.TLabel"), ("pending", "Warn.TLabel"),
+                           ("gone", "Gone.TLabel")):
+            col = ttk.Frame(stats)
+            col.pack(side="left", padx=(18, 0))
+            v = ttk.Label(col, text="0", style=style, font=FONTS["title"])
+            v.pack(anchor="e")
+            ttk.Label(col, text={"n": "items", "done": "saved", "pending": "missing",
+                                 "gone": "deleted upstream"}[key], style="Muted.TLabel").pack(anchor="e")
+            self.stat_labels[key] = v
+        self.l_meta = ttk.Label(head, text="", style="Muted.TLabel")
+        self.l_meta.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
         self._build_sources()
         self._build_items()
         self._build_grabber()
         self._build_activity()
-        self.nb.bind("<<NotebookTabChanged>>", lambda e: self.refresh_items() if self.nb.index("current") == 1 else None)
+        self.nb.bind("<<NotebookTabChanged>>",
+                     lambda e: self.refresh_items(force=True) if self.nb.index("current") == TAB_ITEMS else None)
+        self._build_welcome(right)
 
-        self.status = ttk.Label(self.root, text="", style="Muted.TLabel", padding=(10, 0, 10, 6))
-        self.status.pack(fill="x")
+        self._bind_keys()
+
+    def _build_menu(self):
+        mb = make_menu(self.root)
+        m = make_menu(mb)
+        m.add_command(label="New archive...", accelerator="Ctrl+N", command=self.new_archive)
+        m.add_command(label="Open archive folder...", accelerator="Ctrl+O", command=self.open_archive)
+        m.add_separator()
+        m.add_command(label="Export ledger to CSV...", command=self.export_csv)
+        m.add_separator()
+        m.add_command(label="Quit", accelerator="Ctrl+Q", command=self.on_close)
+        mb.add_cascade(label="File", menu=m)
+        m = make_menu(mb)
+        m.add_command(label="Check archive", accelerator="Ctrl+R", command=self.check_selected_archive)
+        m.add_command(label="Scan only (no downloads)", accelerator="Ctrl+Shift+S", command=self.scan_archive)
+        m.add_command(label="Check all archives", accelerator="Ctrl+Shift+R", command=self.check_all)
+        m.add_command(label="Stop", command=self.stop)
+        m.add_separator()
+        m.add_command(label="Add sources...", accelerator="Ctrl+Shift+A", command=self.add_source)
+        m.add_command(label="Edit archive...", command=self.edit_archive)
+        m.add_command(label="Show folder", command=self.open_archive_folder)
+        m.add_command(label="Open check logs", command=self.open_logs)
+        m.add_separator()
+        m.add_command(label="Remove from list...", command=self.remove_archive)
+        mb.add_cascade(label="Archive", menu=m)
+        m = make_menu(mb)
+        for i, name in enumerate(("Sources", "Items", "Link grabber", "Activity")):
+            m.add_command(label=name, accelerator=f"Ctrl+{i + 1}", command=lambda i=i: self.nb.select(i))
+        m.add_separator()
+        tm = make_menu(m)
+        self.v_theme = tk.StringVar(value=self.cfg["theme"] if self.cfg["theme"] in THEMES else "Hoardwatch")
+        for name in THEMES:
+            tm.add_radiobutton(label=name, value=name, variable=self.v_theme, command=self.set_theme)
+        m.add_cascade(label="Theme", menu=tm)
+        self.v_verbose = tk.BooleanVar(value=self.cfg["verbose_log"])
+        m.add_checkbutton(label="Show yt-dlp detail in the log", variable=self.v_verbose,
+                          command=lambda: self._save_flag("verbose_log", self.v_verbose.get()))
+        mb.add_cascade(label="View", menu=m)
+        m = make_menu(mb)
+        m.add_command(label="Tools and updates...", command=self.open_tools)
+        m.add_command(label="Settings...", accelerator="Ctrl+,", command=self.open_settings)
+        self.v_clip = tk.BooleanVar(value=self.cfg["clipboard_watch"])
+        m.add_checkbutton(label="Watch clipboard for links", variable=self.v_clip, command=self._clip_toggle)
+        mb.add_cascade(label="Tools", menu=m)
+        m = make_menu(mb)
+        m.add_command(label="Project page", command=lambda: webbrowser.open(REPO_URL))
+        m.add_command(label="Open data folder", command=lambda: open_path(DATA_DIR))
+        m.add_separator()
+        m.add_command(label="About", command=self.about)
+        mb.add_cascade(label="Help", menu=m)
+        self.root.configure(menu=mb)
+
+    def _bind_keys(self):
+        r = self.root
+        for seq, fn in (("<Control-n>", self.new_archive), ("<Control-o>", self.open_archive),
+                        ("<Control-r>", self.check_selected_archive), ("<Control-R>", self.check_all),
+                        ("<Control-S>", self.scan_archive), ("<Control-A>", self.add_source),
+                        ("<Control-q>", self.on_close), ("<Control-comma>", self.open_settings),
+                        ("<F5>", lambda: self.refresh_all())):
+            r.bind(seq, lambda e, fn=fn: (fn(), "break")[1])
+        for i in range(4):
+            r.bind(f"<Control-Key-{i + 1}>", lambda e, i=i: self.nb.select(i))
+        r.bind("<Control-f>", lambda e: self.focus_search())
+
+    def _build_welcome(self, parent):
+        w = ttk.Frame(parent, style="Panel.TFrame")
+        box = ttk.Frame(w, style="Panel.TFrame", padding=30)
+        box.place(relx=0.5, rely=0.42, anchor="center")
+        ttk.Label(box, text="No archives yet", style="PanelBig.TLabel").pack()
+        self._welcome_labels = [ttk.Label(box, style="Panel.TLabel", wraplength=520, justify="center", text=(
+            "An archive is a folder Hoardwatch downloads into, with a ledger that remembers every item "
+            "each source has listed. Create one, add channel, profile or playlist URLs as sources, "
+            "then press Check archive."))]
+        self._welcome_labels[0].pack(pady=(10, 18))
+        row = ttk.Frame(box, style="Panel.TFrame")
+        row.pack()
+        ttk.Button(row, text="New archive", style="Accent.TButton", command=self.new_archive).pack(side="left")
+        ttk.Button(row, text="Open existing folder", command=self.open_archive).pack(side="left", padx=(8, 0))
+        self.l_welcome_tools = ttk.Label(box, text="", style="PanelWarn.TLabel", wraplength=520,
+                                         justify="center")
+        self.l_welcome_tools.pack(pady=(18, 0))
+        self.welcome = w
+
+    def _show_welcome(self, on):
+        if on:
+            self.welcome.place(in_=self.right, relx=0, rely=0, relwidth=1, relheight=1)
+            self.welcome.lift()
+        else:
+            self.welcome.place_forget()
 
     def _build_sources(self):
         f = ttk.Frame(self.nb, padding=8)
         self.nb.add(f, text="Sources")
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(0, 6))
+        tip(ttk.Button(bar, text="Add sources", style="Accent.TButton", command=self.add_source),
+            "Paste one or more channel, profile, playlist or post URLs. Ctrl+Shift+A").pack(side="left")
+        ttk.Button(bar, text="Edit", command=self.edit_source).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="Remove", command=self.remove_source).pack(side="left", padx=(6, 0))
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=12)
+        tip(ttk.Button(bar, text="Check selected", command=lambda: self.check_sources(True)),
+            "List the selected sources and download what is missing.").pack(side="left")
+        tip(ttk.Button(bar, text="Scan selected", command=lambda: self.check_sources(False)),
+            "List the selected sources and update the ledger without downloading.").pack(side="left", padx=(6, 0))
         tf, self.t_src = make_tree(f, [("label", "Label", 170), ("url", "URL", 250), ("backend", "Backend", 95),
                                        ("items", "Items", 60), ("done", "Saved", 65), ("pending", "Missing", 75),
                                        ("gone", "Deleted", 75), ("last", "Last check", 130),
                                        ("status", "Status", 200)])
         tf.pack(fill="both", expand=True)
-        self.t_src.bind("<Double-1>", lambda e: self.edit_source())
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(6, 0))
-        ttk.Button(bar, text="Add", command=self.add_source).pack(side="left")
-        ttk.Button(bar, text="Edit", command=self.edit_source).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="Remove", command=self.remove_source).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="Check selected", command=lambda: self.check_sources(True)).pack(side="left", padx=(18, 0))
-        ttk.Button(bar, text="Scan selected only", command=lambda: self.check_sources(False)).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="Scan whole archive", command=self.scan_archive).pack(side="left", padx=(6, 0))
+        self.t_src.bind("<Double-1>", lambda e: self.edit_source() if self.t_src.identify_row(e.y) else None)
+        self.t_src.bind("<Return>", lambda e: self.edit_source())
+        self.t_src.bind("<Delete>", lambda e: self.remove_source())
+        self.t_src.bind("<Button-3>", self._src_menu)
+        self.t_src.bind("<Control-a>", lambda e: (self.t_src.selection_set(self.t_src.get_children()), "break")[1])
+        self.m_src = make_menu(self.root)
+        self.m_src.add_command(label="Check selected", command=lambda: self.check_sources(True))
+        self.m_src.add_command(label="Scan selected", command=lambda: self.check_sources(False))
+        self.m_src.add_separator()
+        self.m_src.add_command(label="Show items", command=self.source_items)
+        self.m_src.add_command(label="Open URL", command=self.source_url)
+        self.m_src.add_command(label="Copy URL", command=self.source_copy)
+        self.m_src.add_command(label="Show folder", command=self.source_folder)
+        self.m_src.add_separator()
+        self.m_src.add_command(label="Edit...", command=self.edit_source)
+        self.m_src.add_command(label="Include in checks", command=lambda: self.source_enable(1))
+        self.m_src.add_command(label="Exclude from checks", command=lambda: self.source_enable(0))
+        self.m_src.add_separator()
+        self.m_src.add_command(label="Remove...", command=self.remove_source)
         ttk.Label(f, text="Check lists each source and downloads what is missing. Scan only updates the "
-                          "ledger, which is how deletions get recorded without spending bandwidth.",
+                          "ledger, which is how deletions get recorded without spending bandwidth. "
+                          "Right-click a source for more.",
                   style="Muted.TLabel", wraplength=860, justify="left").pack(anchor="w", pady=(6, 0))
 
     def _build_items(self):
@@ -2558,73 +3148,88 @@ class App:
         self.v_fstat = tk.StringVar(value="Any status")
         self.v_fup = tk.StringVar(value="Online or deleted")
         self.v_ftext = tk.StringVar()
-        self.c_fsrc = ttk.Combobox(flt, textvariable=self.v_fsrc, state="readonly", width=28)
+        self.c_fsrc = ttk.Combobox(flt, textvariable=self.v_fsrc, state="readonly", width=26)
         self.c_fsrc.pack(side="left")
-        ttk.Combobox(flt, textvariable=self.v_fstat, state="readonly", width=14,
-                     values=["Any status", "pending", "done", "failed", "unavailable", "skipped"]).pack(side="left", padx=6)
-        ttk.Combobox(flt, textvariable=self.v_fup, state="readonly", width=18,
+        ttk.Combobox(flt, textvariable=self.v_fstat, state="readonly", width=13,
+                     values=["Any status", "pending", "done", "failed", "unavailable", "skipped", "missed"]
+                     ).pack(side="left", padx=6)
+        ttk.Combobox(flt, textvariable=self.v_fup, state="readonly", width=17,
                      values=["Online or deleted", "Still online", "Deleted upstream"]).pack(side="left")
+        tip(ttk.Button(flt, text="Reset", command=self.reset_filters), "Clear every filter").pack(side="left", padx=6)
+        ttk.Button(flt, text="Export CSV", command=self.export_csv).pack(side="right")
         flt2 = ttk.Frame(f)
         flt2.pack(fill="x", pady=(0, 6))
         ttk.Label(flt2, text="Search").pack(side="left")
-        e = ttk.Entry(flt2, textvariable=self.v_ftext, width=36)
-        e.pack(side="left", padx=6)
-        e.bind("<Return>", lambda ev: self.refresh_items(force=True))
+        self.e_search = ttk.Entry(flt2, textvariable=self.v_ftext, width=40)
+        self.e_search.pack(side="left", padx=6)
+        tip(self.e_search, "Title, URL, uploader or item key. Filters as you type. Ctrl+F")
+        self.e_search.bind("<Escape>", lambda ev: self.v_ftext.set(""))
+        self.e_search.bind("<Return>", lambda ev: self.refresh_items(force=True))
         for v in (self.v_fsrc, self.v_fstat, self.v_fup):
             v.trace_add("write", lambda *a: self.refresh_items(force=True))
-        ttk.Button(flt2, text="Search", command=lambda: self.refresh_items(force=True)).pack(side="left")
-        ttk.Button(flt2, text="Export CSV", command=self.export_csv).pack(side="right")
+        self.v_ftext.trace_add("write", lambda *a: self._search_soon())
         self.l_items = ttk.Label(flt2, text="", style="Muted.TLabel")
-        self.l_items.pack(side="right", padx=10)
+        self.l_items.pack(side="right")
         tf, self.t_items = make_tree(f, [("title", "Title", 320), ("source", "Source", 140), ("status", "Status", 90),
                                          ("upstream", "Online", 80), ("date", "Posted", 90),
                                          ("seen", "First seen", 135), ("file", "File", 220)])
         tf.pack(fill="both", expand=True)
-        self.t_items.bind("<Double-1>", lambda e: self.item_open())
-        self.m_items = tk.Menu(self.root, tearoff=0, bg=PAL["field"], fg=PAL["fg"],
-                               activebackground=PAL["sel"], activeforeground=PAL["fg"])
+        self.t_items.bind("<Double-1>", lambda e: self.item_open() if self.t_items.identify_row(e.y) else None)
+        self.t_items.bind("<Return>", lambda e: self.item_open())
+        self.t_items.bind("<Control-c>", lambda e: self.item_copy())
+        self.t_items.bind("<Control-a>", lambda e: (self.t_items.selection_set(self.t_items.get_children()), "break")[1])
+        self.m_items = make_menu(self.root)
         self.m_items.add_command(label="Open file", command=self.item_open)
         self.m_items.add_command(label="Show in folder", command=self.item_reveal)
         self.m_items.add_command(label="Open original URL", command=self.item_url)
-        self.m_items.add_command(label="Copy URL", command=self.item_copy)
+        self.m_items.add_command(label="Copy URL", accelerator="Ctrl+C", command=self.item_copy)
+        self.m_items.add_command(label="Copy title", command=self.item_copy_title)
         self.m_items.add_separator()
         self.m_items.add_command(label="Queue again (mark pending)", command=lambda: self.item_status("pending"))
         self.m_items.add_command(label="Mark as saved", command=lambda: self.item_status("done"))
-        self.m_items.add_command(label="Show error", command=self.item_error)
+        self.m_items.add_command(label="Show details and error", command=self.item_error)
         self.t_items.bind("<Button-3>", self._items_menu)
-        self.t_items.bind("<Button-2>", self._items_menu)
+        if IS_MAC:
+            self.t_items.bind("<Button-2>", self._items_menu)
         self.item_rows: dict[str, dict] = {}
 
     def _build_grabber(self):
         f = ttk.Frame(self.nb, padding=8)
         self.nb.add(f, text="Link grabber")
-        ttk.Label(f, text="Paste text, a list of links or web pages. Hoardwatch pulls out every link and shows "
+        ttk.Label(f, text="Paste text, a list of links or web pages. Find links pulls out every link and shows "
                           "which backend can handle it. Scan pages reads each pasted page and finds embedded "
                           "or linked media.", style="Muted.TLabel", wraplength=900, justify="left").pack(anchor="w")
-        self.t_paste = make_text(f, height=6)
+        self.t_paste = make_text(f, height=5)
         self.t_paste.pack(fill="x", pady=6)
         bar = ttk.Frame(f)
         bar.pack(fill="x")
         ttk.Button(bar, text="Find links", command=self.grab_links).pack(side="left")
         ttk.Button(bar, text="Scan pages", command=self.grab_deep).pack(side="left", padx=6)
         ttk.Button(bar, text="Clear", command=self.grab_clear).pack(side="left")
-        self.v_clip = tk.BooleanVar(value=self.cfg["clipboard_watch"])
-        ttk.Checkbutton(bar, text="Watch clipboard", variable=self.v_clip, command=self._clip_toggle).pack(side="left", padx=18)
+        tip(ttk.Checkbutton(bar, text="Watch clipboard", variable=self.v_clip, command=self._clip_toggle),
+            "Any link you copy anywhere shows up in the list below while this is on.").pack(side="left", padx=18)
+        self.l_links = ttk.Label(bar, text="", style="Muted.TLabel")
+        self.l_links.pack(side="right")
         tf, self.t_links = make_tree(f, [("url", "URL", 600), ("handler", "Handled by", 220)])
         tf.pack(fill="both", expand=True, pady=6)
+        self.t_links.bind("<Delete>", lambda e: self.grab_remove())
+        self.t_links.bind("<Control-a>", lambda e: (self.t_links.selection_set(self.t_links.get_children()), "break")[1])
         add = ttk.Frame(f)
         add.pack(fill="x")
         ttk.Label(add, text="Add selected to").pack(side="left")
         self.v_gtarget = tk.StringVar()
-        self.c_gtarget = ttk.Combobox(add, textvariable=self.v_gtarget, state="readonly", width=30)
+        self.c_gtarget = ttk.Combobox(add, textvariable=self.v_gtarget, state="readonly", width=28)
         self.c_gtarget.pack(side="left", padx=6)
         ttk.Label(add, text="Subfolder").pack(side="left", padx=(12, 0))
         self.v_gsub = tk.StringVar()
-        ttk.Entry(add, textvariable=self.v_gsub, width=20).pack(side="left", padx=6)
-        ttk.Button(add, text="Add as sources", command=lambda: self.grab_add(False)).pack(side="left", padx=6)
+        tip(ttk.Entry(add, textvariable=self.v_gsub, width=18),
+            "Blank gives each source its own folder. A name puts them all into one shared folder.").pack(side="left", padx=6)
+        ttk.Button(add, text="Remove", command=self.grab_remove).pack(side="left", padx=(0, 6))
+        ttk.Button(add, text="Add as sources", command=lambda: self.grab_add(False)).pack(side="left")
         ttk.Button(add, text="Add and check now", style="Accent.TButton",
-                   command=lambda: self.grab_add(True)).pack(side="left")
-        ttk.Label(add, text="Blank subfolder gives each source its own folder.", style="Muted.TLabel").pack(side="left", padx=10)
+                   command=lambda: self.grab_add(True)).pack(side="left", padx=6)
+        ttk.Label(f, text="With nothing selected, every link in the list is added.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
 
     def _build_activity(self):
         f = ttk.Frame(self.nb, padding=8)
@@ -2633,23 +3238,34 @@ class App:
         pw.pack(fill="both", expand=True)
         tf, self.t_tasks = make_tree(pw, [("title", "Item", 520), ("progress", "Progress", 90),
                                           ("speed", "Speed", 100), ("eta", "ETA", 70), ("state", "State", 100)],
-                                     height=8)
+                                     height=7)
         pw.add(tf, weight=1)
         lf = ttk.Frame(pw)
         pw.add(lf, weight=2)
         hdr = ttk.Frame(lf)
-        hdr.pack(fill="x", pady=(6, 4))
+        hdr.pack(fill="x", pady=(8, 4))
         ttk.Label(hdr, text="Log", style="Title.TLabel").pack(side="left")
-        self.v_verbose = tk.BooleanVar(value=self.cfg["verbose_log"])
         ttk.Checkbutton(hdr, text="Show yt-dlp detail", variable=self.v_verbose,
                         command=lambda: self._save_flag("verbose_log", self.v_verbose.get())).pack(side="left", padx=12)
+        self.v_wrap = tk.BooleanVar(value=False)
+        ttk.Checkbutton(hdr, text="Wrap lines", variable=self.v_wrap,
+                        command=lambda: self.t_log.configure(wrap="word" if self.v_wrap.get() else "none")
+                        ).pack(side="left")
         ttk.Button(hdr, text="Clear", command=lambda: self.t_log.delete("1.0", "end")).pack(side="right")
-        ttk.Button(hdr, text="Open log folder", command=self.open_logs).pack(side="right", padx=6)
-        self.t_log = make_text(lf, height=10, wrap="none")
-        self.t_log.pack(fill="both", expand=True)
-        for tag, color in (("warn", PAL["warn"]), ("error", PAL["err"]), ("ok", PAL["ok"]),
-                           ("debug", PAL["muted"]), ("time", PAL["muted"])):
-            self.t_log.tag_configure(tag, foreground=color)
+        ttk.Button(hdr, text="Copy all", command=self.copy_log).pack(side="right", padx=6)
+        ttk.Button(hdr, text="Open log folder", command=self.open_logs).pack(side="right")
+        lw = ttk.Frame(lf)
+        lw.pack(fill="both", expand=True)
+        self.t_log = make_text(lw, height=10, wrap="none", mono=True,
+                               tags={"warn": "warn", "error": "err", "ok": "ok", "debug": "muted", "time": "muted"})
+        ys = ttk.Scrollbar(lw, orient="vertical", command=self.t_log.yview)
+        xs = ttk.Scrollbar(lw, orient="horizontal", command=self.t_log.xview)
+        self.t_log.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        self.t_log.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
+        lw.rowconfigure(0, weight=1)
+        lw.columnconfigure(0, weight=1)
 
     # ---- event pump
     def pump(self):
@@ -2674,16 +3290,16 @@ class App:
             self.l_state.configure(text=f"Checking {d['name']}")
         elif ev == "check_finished":
             s = d["summary"]
-            self.l_state.configure(text=f"Last check: {s['downloaded']} saved, {s['new']} new, "
-                                        f"{s['gone']} deleted upstream, {s['failed']} failed")
+            db = self.get_db(d["path"])
+            name = db.name if db else os.path.basename(d["path"])
+            self.l_state.configure(text=f"{name}: {s['downloaded']} saved, {s['new']} new, "
+                                        f"{s['gone']} deleted upstream, {s['failed']} failed"
+                                        + (f", {s['errors']} source error(s)" if s.get("errors") else ""))
             self.dirty.add(d["path"])
+            if self.root.focus_displayof() is None:
+                self.root.bell()
         elif ev == "runner_state":
-            busy = self.runner.busy()
-            q = self.runner.queued()
-            if not busy:
-                self.l_state.configure(text="Idle")
-            self.status.configure(text=f"yt-dlp {ytdlp_version()} ({YTDLP_SOURCE})"
-                                       + (f"   {q} check(s) queued" if q else ""))
+            self._set_busy(self.runner.busy())
         elif ev == "links":
             self.add_link_rows(d["rows"])
             if d.get("msg"):
@@ -2691,7 +3307,7 @@ class App:
         elif ev == "proxy_test":
             w = d["widget"]
             if w.winfo_exists():
-                w.insert("end", d["line"] + "\n")
+                w.insert("end", d["line"] + "\n", d.get("tag") or ())
         elif ev == "tools_status":
             dlg = d["dialog"]
             if dlg.winfo_exists():
@@ -2705,7 +3321,30 @@ class App:
         elif ev == "tools_refresh":
             dlg = d["dialog"]
             if dlg.winfo_exists():
+                dlg.set_busy(-1)
                 dlg.refresh()
+        elif ev == "tools_missing":
+            self.l_welcome_tools.configure(text="Not installed yet: " + ", ".join(d["names"]) +
+                                           ". Open Tools to install them before the first check.")
+            self.b_tools.configure(text="Tools (" + str(len(d["names"])) + " missing)")
+
+    def _set_busy(self, busy):
+        q = self.runner.queued() if hasattr(self, "runner") else 0
+        self.b_stop.state(["!disabled"] if busy else ["disabled"])
+        if busy:
+            if not self.pb.winfo_ismapped():
+                self.pb.pack(side="left", padx=(14, 0), before=self.l_state)
+                self.pb.start(12)
+        else:
+            self.pb.stop()
+            self.pb.pack_forget()
+            if not self.l_state.cget("text").startswith(tuple(n + ":" for n in self._archive_names())):
+                self.l_state.configure(text="Idle")
+        self.status.configure(text=f"{APP_NAME} {APP_VERSION}   yt-dlp {ytdlp_version()} ({YTDLP_SOURCE})"
+                                   + (f"   {q} check(s) queued" if q else ""))
+
+    def _archive_names(self):
+        return [db.name for db in (self.get_db(p) for p in self.cfg["archives"]) if db]
 
     def tick(self):
         if self.dirty:
@@ -2713,20 +3352,32 @@ class App:
             self.refresh_archives(keep=True)
             if self.sel_path in paths:
                 self.refresh_sources()
-                if self.nb.index("current") == 1:
+                if self.nb.index("current") == TAB_ITEMS:
                     self.refresh_items()
         self.root.after(1000, self.tick)
+
+    def refresh_all(self):
+        self.refresh_archives(keep=True)
+        self.refresh_sources()
+        self.refresh_items(force=True)
 
     def log(self, level, msg):
         if level == "debug" and not self.v_verbose.get():
             return
         t = self.t_log
+        at_end = t.yview()[1] >= 0.999
         t.insert("end", dt.datetime.now().strftime("%H:%M:%S "), "time")
         t.insert("end", msg + "\n", level if level in ("warn", "error", "ok", "debug") else ())
         lines = int(t.index("end-1c").split(".")[0])
         if lines > 6000:
             t.delete("1.0", f"{lines - 5000}.0")
-        t.see("end")
+        if at_end:
+            t.see("end")
+
+    def copy_log(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.t_log.get("1.0", "end-1c"))
+        self._last_clip = self.t_log.get("1.0", "end-1c")
 
     def update_task(self, d):
         tid = d["id"]
@@ -2747,8 +3398,16 @@ class App:
             vals[4] = d["state"]
         tag = {"done": "done", "failed": "failed", "unavailable": "unavailable", "skipped": "skipped"}.get(vals[4], ())
         self.t_tasks.item(iid, values=vals, tags=tag)
-        if d.get("state") in ("done", "failed", "unavailable", "skipped", "stopped"):
-            self.root.after(15000, lambda i=iid: self.t_tasks.exists(i) and self.t_tasks.delete(i))
+        if vals[4] in FINISHED_STATES:
+            self.active.discard(tid)
+            if tid not in self.finished:
+                self.finished.add(tid)
+                self.root.after(15000, lambda i=iid: (self.t_tasks.exists(i) and self.t_tasks.delete(i),
+                                                      set_empty(self.t_tasks, "No downloads running.")))
+        else:
+            self.active.add(tid)
+        set_empty(self.t_tasks, "No downloads running.")
+        self.nb.tab(TAB_ACTIVITY, text=f"Activity ({len(self.active)})" if self.active else "Activity")
 
     # ---- archives
     def refresh_archives(self, keep=False):
@@ -2758,13 +3417,17 @@ class App:
         for path in self.cfg["archives"]:
             db = self.get_db(path)
             if db is None:
-                self.t_arch.insert("", "end", iid=path, values=(f"{os.path.basename(path)} (folder missing)", "", "", ""),
+                self.t_arch.insert("", "end", iid=path, values=(f"{os.path.basename(path)} (folder missing)", "", ""),
                                    tags=("error",))
                 continue
             t = db.totals()
-            self.t_arch.insert("", "end", iid=path, values=(db.name, t["n"], t["pending"], t["gone"]))
+            tags = ("gone",) if t["gone"] else ()
+            self.t_arch.insert("", "end", iid=path, tags=tags, values=(db.name, t["pending"], t["gone"]))
             names.append(db.name)
-        self.c_gtarget.configure(values=[self.get_db(p).name for p in self.cfg["archives"] if self.get_db(p)])
+        sort_tree(self.t_arch)
+        set_empty(self.t_arch, "Press New to create\nyour first archive.")
+        self.c_gtarget.configure(values=names)
+        self._show_welcome(not self.cfg["archives"])
         if sel and self.t_arch.exists(sel):
             self.t_arch.selection_set(sel)
         elif not keep and self.cfg["archives"]:
@@ -2773,6 +3436,31 @@ class App:
                 self.t_arch.selection_set(first)
         if not self.v_gtarget.get() and names:
             self.v_gtarget.set(names[0])
+        self.refresh_header()
+
+    def refresh_header(self):
+        db = self.cur_db(warn=False)
+        if not db:
+            self.l_title.configure(text="No archive selected" if self.cfg["archives"] else "")
+            self.l_path.configure(text="")
+            self.l_meta.configure(text="")
+            for v in self.stat_labels.values():
+                v.configure(text="-")
+            return
+        t = db.totals()
+        s = db.settings()
+        self.l_title.configure(text=db.name)
+        p = db.root
+        self.l_path.configure(text=p if len(p) <= 64 else p[:22] + "..." + p[-39:])
+        for k, v in self.stat_labels.items():
+            v.configure(text=f"{t.get(k, 0):,}")
+        mins = int(s.get("auto_check_minutes") or 0)
+        bits = [f"{t['sources']} source{'s' if t['sources'] != 1 else ''}",
+                f"last check {ago(db.get_meta('last_check'))}",
+                f"auto-check every {mins} min" if mins else "auto-check off"]
+        if s.get("default_auth"):
+            bits.append(f"account {s['default_auth']}")
+        self.l_meta.configure(text="   |   ".join(bits))
 
     def on_archive_select(self):
         sel = self.t_arch.selection()
@@ -2783,9 +3471,17 @@ class App:
         db = self.get_db(path) if path else None
         if db:
             self.v_gtarget.set(db.name)
+        self.refresh_header()
         self.refresh_sources()
         self.v_fsrc.set("All sources")
         self.refresh_items(force=True)
+
+    def _arch_menu(self, ev):
+        iid = self.t_arch.identify_row(ev.y)
+        if iid:
+            self.t_arch.selection_set(iid)
+            self.on_archive_select()
+            self.m_arch.tk_popup(ev.x_root, ev.y_root)
 
     def cur_db(self, warn=True) -> ArchiveDB | None:
         db = self.get_db(self.sel_path) if self.sel_path else None
@@ -2804,17 +3500,25 @@ class App:
         self.sel_path = None
         self.refresh_archives()
         self.t_arch.selection_set(path)
+        self.t_arch.see(path)
 
     def new_archive(self):
         r = ArchiveDialog(self.root, self).show()
         if r:
-            self._register_archive(os.path.abspath(r["path"]), r)
+            path = os.path.abspath(r["path"])
+            self._register_archive(path, r)
+            self.nb.select(TAB_SOURCES)
+            if not self.get_db(path).sources():
+                self.add_source()
 
     def open_archive(self):
         path = filedialog.askdirectory(parent=self.root, title="Open an archive folder")
         if not path:
             return
         path = os.path.abspath(path)
+        if path in self.cfg["archives"]:
+            self.t_arch.selection_set(path)
+            return
         if not ArchiveDB.is_archive(path) and not messagebox.askyesno(
                 APP_NAME, "That folder is not an archive yet. Create one there?", parent=self.root):
             return
@@ -2834,7 +3538,9 @@ class App:
     def remove_archive(self):
         if not self.sel_path:
             return
-        if not messagebox.askyesno(APP_NAME, "Remove this archive from the list? Files and the ledger stay on "
+        db = self.get_db(self.sel_path)
+        name = db.name if db else os.path.basename(self.sel_path)
+        if not messagebox.askyesno(APP_NAME, f"Remove \"{name}\" from the list?\n\nFiles and the ledger stay on "
                                              "disk and can be opened again later.", parent=self.root):
             return
         self.cfg["archives"] = [p for p in self.cfg["archives"] if p != self.sel_path]
@@ -2865,6 +3571,7 @@ class App:
         self.source_ids = {}
         if not db:
             self.c_fsrc.configure(values=["All sources"])
+            set_empty(self.t_src, "Select an archive on the left." if self.cfg["archives"] else "")
             return
         stats = db.source_stats()
         names = ["All sources"]
@@ -2875,40 +3582,94 @@ class App:
             if s["backend"] == "auto" and s.get("resolved_backend"):
                 backend = f"auto: {bnames.get(s['resolved_backend'])}"
             tags = ()
+            status = s.get("last_status") or ""
             if not s["enabled"]:
                 tags = ("off",)
-            elif (s.get("last_status") or "").startswith(("error", "deleted")):
+                status = "excluded from checks" + (f"; {status}" if status else "")
+            elif status.startswith(("error", "deleted")):
                 tags = ("error",)
             elif (st.get("gone") or 0) > 0:
                 tags = ("gone",)
             iid = str(s["id"])
             self.t_src.insert("", "end", iid=iid, tags=tags, values=(
                 s["label"], s["url"], backend, st.get("n") or 0, st.get("done") or 0, st.get("pending") or 0,
-                st.get("gone") or 0, short_ts(s.get("last_check")), s.get("last_status") or ""))
+                st.get("gone") or 0, short_ts(s.get("last_check")) or "never", status))
             label = f"{s['label']}  #{s['id']}"
             names.append(label)
             self.source_ids[label] = s["id"]
         for i in sel:
             if self.t_src.exists(i):
                 self.t_src.selection_add(i)
+        sort_tree(self.t_src)
+        set_empty(self.t_src, "No sources in this archive yet.\nPress Add sources and paste channel, "
+                              "profile, playlist or post URLs.")
         self.c_fsrc.configure(values=names)
 
     def selected_source_ids(self) -> list[int]:
         return [int(i) for i in self.t_src.selection()]
 
-    def add_source(self):
+    def _src_menu(self, ev):
+        iid = self.t_src.identify_row(ev.y)
+        if iid:
+            if iid not in self.t_src.selection():
+                self.t_src.selection_set(iid)
+            self.m_src.tk_popup(ev.x_root, ev.y_root)
+
+    def _sel_sources(self) -> list[dict]:
+        db = self.cur_db(warn=False)
+        return [s for s in (db.source(i) for i in self.selected_source_ids())] if db else []
+
+    def source_items(self):
+        ids = self.selected_source_ids()
+        if ids:
+            label = next((k for k, v in self.source_ids.items() if v == ids[0]), "All sources")
+            self.v_fsrc.set(label)
+            self.nb.select(TAB_ITEMS)
+
+    def source_url(self):
+        for s in self._sel_sources()[:5]:
+            webbrowser.open(s["url"])
+
+    def source_copy(self):
+        urls = "\n".join(s["url"] for s in self._sel_sources())
+        if urls:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(urls)
+            self._last_clip = urls
+
+    def source_folder(self):
+        db = self.cur_db()
+        for s in self._sel_sources()[:1]:
+            p = os.path.join(db.root, s.get("subdir") or safe_name(s["label"]))
+            open_path(p if os.path.isdir(p) else db.root)
+
+    def source_enable(self, on):
+        db = self.cur_db()
+        ids = self.selected_source_ids()
+        if db and ids:
+            for i in ids:
+                db.update_source(i, enabled=on)
+            self.refresh_sources()
+
+    def add_source(self, urls=""):
         db = self.cur_db()
         if not db:
             return
-        r = SourceDialog(self.root, self).show()
+        r = SourceDialog(self.root, self, urls=urls).show()
         if not r:
             return
         added, dupes = self._add_sources(db, r["urls"], r["label"] if len(r["urls"]) == 1 else "",
                                          r["subdir"], r["backend"], r["auth"])
-        if dupes:
-            messagebox.showinfo(APP_NAME, f"Already in this archive: {dupes}", parent=self.root)
         self.refresh_sources()
         self.refresh_archives(keep=True)
+        self.nb.select(TAB_SOURCES)
+        for i in added:
+            if self.t_src.exists(str(i)):
+                self.t_src.selection_add(str(i))
+        msg = f"Added {len(added)} source(s) to {db.name}." + (f" {dupes} were already in it." if dupes else "")
+        self.log("ok", msg)
+        if added and messagebox.askyesno(APP_NAME, msg + "\n\nCheck the new sources now?", parent=self.root):
+            self.runner.submit(db.root, added, True)
 
     def _add_sources(self, db, urls, label, subdir, backend="auto", auth=""):
         added, dupes = [], 0
@@ -2922,7 +3683,7 @@ class App:
     def edit_source(self):
         db = self.cur_db()
         ids = self.selected_source_ids()
-        if not db or len(ids) != 1:
+        if not db or not ids:
             return
         src = db.source(ids[0])
         r = SourceDialog(self.root, self, src).show()
@@ -2945,7 +3706,8 @@ class App:
         if self.runner.busy():
             messagebox.showinfo(APP_NAME, "Stop the running check before removing sources.", parent=self.root)
             return
-        if not messagebox.askyesno(APP_NAME, f"Remove {len(ids)} source(s) and their ledger entries? "
+        what = f"\"{db.source(ids[0])['label']}\"" if len(ids) == 1 else f"{len(ids)} sources"
+        if not messagebox.askyesno(APP_NAME, f"Remove {what} and their ledger entries?\n\n"
                                              "Downloaded files are not deleted.", parent=self.root):
             return
         for i in ids:
@@ -2956,13 +3718,17 @@ class App:
     # ---- running
     def check_selected_archive(self):
         db = self.cur_db()
+        if db and not db.sources():
+            if messagebox.askyesno(APP_NAME, "This archive has no sources yet. Add some now?", parent=self.root):
+                self.add_source()
+            return
         if db and not self.runner.submit(db.root):
             self.log("info", "That check is already queued or running.")
 
     def scan_archive(self):
         db = self.cur_db()
-        if db:
-            self.runner.submit(db.root, None, False)
+        if db and not self.runner.submit(db.root, None, False):
+            self.log("info", "That scan is already queued or running.")
 
     def check_sources(self, download):
         db = self.cur_db()
@@ -2970,7 +3736,7 @@ class App:
         if not db:
             return
         if not ids:
-            messagebox.showinfo(APP_NAME, "Select one or more sources.", parent=self.root)
+            messagebox.showinfo(APP_NAME, "Select one or more sources first.", parent=self.root)
             return
         self.runner.submit(db.root, ids, download)
 
@@ -2979,7 +3745,10 @@ class App:
         self.log("info", f"Queued {n} archive check(s)")
 
     def stop(self):
+        if not self.runner.busy():
+            return
         self.runner.stop_all()
+        self.l_state.configure(text="Stopping...")
         self.log("warn", "Stopping. Running downloads are cancelled; partial files resume next time.")
 
     def scheduler_tick(self):
@@ -2996,12 +3765,31 @@ class App:
                 if last is None or (now - last).total_seconds() >= mins * 60:
                     if self.runner.submit(path):
                         self.log("info", f"Scheduled check queued: {db.name}")
+            self.refresh_header()
         except Exception as exc:
             self.log("error", f"Scheduler: {exc}")
         self.root.after(30000, self.scheduler_tick)
 
     # ---- items
+    def _search_soon(self):
+        if self._search_job:
+            self.root.after_cancel(self._search_job)
+        self._search_job = self.root.after(300, lambda: self.refresh_items(force=True))
+
+    def focus_search(self):
+        self.nb.select(TAB_ITEMS)
+        self.e_search.focus_set()
+        self.e_search.select_range(0, "end")
+        return "break"
+
+    def reset_filters(self):
+        self.v_fsrc.set("All sources")
+        self.v_fstat.set("Any status")
+        self.v_fup.set("Online or deleted")
+        self.v_ftext.set("")
+
     def refresh_items(self, force=False):
+        self._search_job = None
         if not force and time.time() - self._last_items_refresh < 3:
             return
         self._last_items_refresh = time.time()
@@ -3010,23 +3798,43 @@ class App:
         db = self.cur_db(warn=False)
         if not db:
             self.l_items.configure(text="")
+            set_empty(self.t_items, "")
             return
         sid = self.source_ids.get(self.v_fsrc.get())
-        status = self.v_fstat.get() if self.v_fstat.get() != "Any status" else None
+        fstat = self.v_fstat.get()
+        status = fstat if fstat not in ("Any status", "missed") else None
         up = {"Still online": "present", "Deleted upstream": "gone"}.get(self.v_fup.get())
-        rows = db.query_items(sid, status, up, self.v_ftext.get().strip() or None, limit=5000)
+        if fstat == "missed":
+            if up == "present":
+                rows = []
+            else:
+                rows = [r for r in db.query_items(sid, None, "gone", self.v_ftext.get().strip() or None, limit=5000)
+                        if r["status"] != "done"]
+        else:
+            rows = db.query_items(sid, status, up, self.v_ftext.get().strip() or None, limit=5000)
+        counts: dict = {}
         for r in rows:
             d = r.get("upload_date") or ""
             if len(d) == 8 and d.isdigit():
                 d = f"{d[:4]}-{d[4:6]}-{d[6:]}"
             tags = ("gone",) if r["upstream"] == "gone" else (r["status"],) if r["status"] != "pending" else ()
             shown = "missed" if r["upstream"] == "gone" and r["status"] != "done" else r["status"]
+            counts[shown] = counts.get(shown, 0) + 1
             iid = self.t_items.insert("", "end", tags=tags, values=(
                 r.get("title") or r.get("url"), r["source_label"], shown,
                 "deleted" if r["upstream"] == "gone" else "yes", d, short_ts(r["first_seen"]),
                 os.path.basename(r.get("filepath") or "")))
             self.item_rows[iid] = r
-        self.l_items.configure(text=f"{len(rows)} shown" + (" (limit reached, filter to narrow)" if len(rows) >= 5000 else ""))
+        sort_tree(self.t_items)
+        parts = [f"{counts[k]} {STATUS_WORDS[k]}" for k in ("done", "pending", "failed", "missed",
+                                                           "unavailable", "skipped") if counts.get(k)]
+        txt = f"{len(rows):,} shown" + (": " + ", ".join(parts) if parts and len(counts) > 1 else "")
+        if len(rows) >= 5000:
+            txt += "  (limit reached, filter to narrow)"
+        self.l_items.configure(text=txt)
+        filtered = (sid or fstat != "Any status" or up or self.v_ftext.get().strip())
+        set_empty(self.t_items, "No items match these filters." if filtered else
+                  "Nothing recorded yet.\nPress Check archive or Scan only to list this archive's sources.")
 
     def _items_menu(self, ev):
         iid = self.t_items.identify_row(ev.y)
@@ -3056,12 +3864,17 @@ class App:
             if r.get("url"):
                 webbrowser.open(r["url"])
 
-    def item_copy(self):
-        urls = [r["url"] for r in self._sel_items() if r.get("url")]
-        if urls:
+    def _clip(self, text):
+        if text:
             self.root.clipboard_clear()
-            self.root.clipboard_append("\n".join(urls))
-            self._last_clip = "\n".join(urls)
+            self.root.clipboard_append(text)
+            self._last_clip = text
+
+    def item_copy(self):
+        self._clip("\n".join(r["url"] for r in self._sel_items() if r.get("url")))
+
+    def item_copy_title(self):
+        self._clip("\n".join(r.get("title") or r.get("url") or "" for r in self._sel_items()))
 
     def item_status(self, status):
         db = self.cur_db()
@@ -3070,12 +3883,16 @@ class App:
             db.set_status([r["id"] for r in rows], status)
             self.refresh_items(force=True)
             self.refresh_sources()
+            self.refresh_archives(keep=True)
 
     def item_error(self):
         rows = self._sel_items()
         if rows:
             r = rows[0]
+            gone = f"\nDeleted upstream since: {short_ts(r.get('gone_since'))}" if r.get("gone_since") else ""
             messagebox.showinfo(APP_NAME, f"{r.get('title') or r.get('url')}\n\nKey: {r['item_key']}\n"
+                                          f"URL: {r.get('url') or ''}\nFile: {r.get('filepath') or 'none'}\n"
+                                          f"First seen: {short_ts(r.get('first_seen'))}{gone}\n"
                                           f"Attempts: {r.get('attempts')}\n\n{r.get('error') or 'No error recorded.'}",
                                 parent=self.root)
 
@@ -3089,16 +3906,29 @@ class App:
         if path:
             n = db.export_csv(path)
             self.log("ok", f"Exported {n} ledger rows to {path}")
+            self.l_state.configure(text=f"Exported {n} rows to {os.path.basename(path)}")
 
     # ---- link grabber
+    def _links_changed(self):
+        n = len(self.t_links.get_children())
+        set_empty(self.t_links, "Links you find, scan or copy (with Watch clipboard on) show up here.")
+        self.l_links.configure(text=f"{n} link(s)" if n else "")
+
     def grab_clear(self):
         self.t_paste.delete("1.0", "end")
         self.t_links.delete(*self.t_links.get_children())
+        self._links_changed()
+
+    def grab_remove(self):
+        for i in self.t_links.selection():
+            self.t_links.delete(i)
+        self._links_changed()
 
     def grab_links(self):
         urls = extract_urls(self.t_paste.get("1.0", "end"))
         if not urls:
             self.log("info", "No links found in the pasted text.")
+            self.l_links.configure(text="No links found in the pasted text")
             return
         self._classify_async(urls)
 
@@ -3112,6 +3942,7 @@ class App:
         urls = extract_urls(self.t_paste.get("1.0", "end"))
         if not urls:
             self.log("info", "Paste one or more page URLs first.")
+            self.l_links.configure(text="Paste one or more page URLs first")
             return
         proxy = meta_proxy(self.cfg.snapshot())
 
@@ -3123,6 +3954,7 @@ class App:
                 except Exception as exc:
                     self.emit("log", level="error", msg=f"Scan failed for {u}: {clean_msg(exc)[:200]}")
         self.log("info", f"Scanning {len(urls)} page(s)")
+        self.l_links.configure(text=f"Scanning {len(urls)} page(s)...")
         threading.Thread(target=work, daemon=True).start()
 
     def add_link_rows(self, rows):
@@ -3131,6 +3963,8 @@ class App:
             if u not in have:
                 self.t_links.insert("", "end", values=(u, h))
                 have.add(u)
+        sort_tree(self.t_links)
+        self._links_changed()
 
     def grab_add(self, check_now):
         name = self.v_gtarget.get()
@@ -3147,6 +3981,8 @@ class App:
         self.log("ok", f"Added {len(added)} source(s) to {db.name}" + (f", {dupes} already present" if dupes else ""))
         for i in sel:
             self.t_links.delete(i)
+        self._links_changed()
+        self.l_links.configure(text=f"Added {len(added)} to {db.name}" + (f", {dupes} already present" if dupes else ""))
         if check_now and added:
             self.runner.submit(path, added, True)
         self.dirty.add(path)
@@ -3177,6 +4013,20 @@ class App:
         self.cfg[key] = bool(value)
         self.cfg.save()
 
+    def set_theme(self):
+        name = self.v_theme.get()
+        retheme(self.root, name)
+        self.cfg["theme"] = name
+        self.cfg.save()
+
+    def open_tools(self):
+        ToolsDialog(self.root, self).show()
+        cfg = self.cfg.snapshot()
+        missing = [n for n in ("ffmpeg", "deno") if not tool_path(cfg, n)]
+        self.b_tools.configure(text=f"Tools ({len(missing)} missing)" if missing else "Tools")
+        self.l_welcome_tools.configure(text="Not installed yet: " + ", ".join(missing) +
+                                       ". Open Tools to install them before the first check." if missing else "")
+
     def open_settings(self):
         r = SettingsDialog(self.root, self).show()
         if r:
@@ -3185,10 +4035,23 @@ class App:
             self.cfg.save()
             self.log("info", "Settings saved. They apply to the next check.")
 
+    def about(self):
+        messagebox.showinfo(APP_NAME, f"{APP_NAME} {APP_VERSION}\n\nA bulk media archiver that remembers what "
+                                      f"it has seen.\n\nyt-dlp {ytdlp_version()} ({YTDLP_SOURCE})\n"
+                                      f"Data folder: {DATA_DIR}\n\n{REPO_URL}\nGPL-3.0-or-later", parent=self.root)
+
     def on_close(self):
         if self.runner.busy() and not messagebox.askyesno(
                 APP_NAME, "A check is running. Stop it and quit?", parent=self.root):
             return
+        try:
+            self.cfg["window_geometry"] = self.root.geometry()
+            pos = int(self.pw.sashpos(0))
+            if pos >= 150:
+                self.cfg["sash"] = pos
+            self.cfg.save()
+        except Exception:
+            pass
         self.runner.stop_all()
         deadline = time.time() + 5
         while self.runner.current and time.time() < deadline:
@@ -3284,7 +4147,7 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("NullAngst.Hoardwatch")
         except Exception:
             pass
-    root = tk.Tk()
+    root = tk.Tk(className=APP_NAME)
     App(root)
     root.mainloop()
 

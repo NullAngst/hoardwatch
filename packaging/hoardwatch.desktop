@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Hoardwatch
+GenericName=Media archiver
+Comment=Bulk media archiver that remembers what each source has listed and deleted
+Exec=Hoardwatch
+Icon=hoardwatch
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=yt-dlp;gallery-dl;archive;download;
+StartupWMClass=Hoardwatch

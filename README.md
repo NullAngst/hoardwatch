@@ -33,16 +33,26 @@ Get the latest build from the [Releases](../../releases) page.
 | Platform | File | Notes |
 |---|---|---|
 | Windows 10/11 x64 | `Hoardwatch-windows-x64.exe` | Unsigned, so SmartScreen will warn. Click "More info", then "Run anyway". |
-| Linux x64 | `Hoardwatch-linux-x64.tar.gz` | Built on Ubuntu 22.04, needs glibc 2.35 or newer. |
-| Linux arm64 | `Hoardwatch-linux-arm64.tar.gz` | Same glibc requirement. |
+| Linux x64 | `Hoardwatch-linux-x64.AppImage` | Built on Ubuntu 22.04, needs glibc 2.35 or newer. |
+| Linux arm64 | `Hoardwatch-linux-arm64.AppImage` | Same glibc requirement. |
 | macOS Apple silicon | `Hoardwatch-macos-arm64.zip` | Unsigned. Right-click the app, choose Open, then Open again. Or run `xattr -dr com.apple.quarantine Hoardwatch.app`. |
 
 Linux:
 
 ```bash
-tar -xzf Hoardwatch-linux-x64.tar.gz
-./Hoardwatch
+chmod +x Hoardwatch-linux-x64.AppImage
+./Hoardwatch-linux-x64.AppImage
 ```
+
+I keep mine in `~/Applications`, since that's where AppImageLauncher and Gear Lever look. Put it wherever you like. Either of those tools also adds a menu entry with the icon.
+
+AppImages need FUSE 2 to mount themselves. Most desktops have it. If you get a "dlopen(): error loading libfuse.so.2" message, install it (`sudo apt install libfuse2t64` on Ubuntu 24.04 and newer, `libfuse2` on older Debian and Ubuntu, `fuse-libs` on Fedora, `fuse2` on Arch, or whichever your distribution calls it), or run it without FUSE:
+
+```bash
+./Hoardwatch-linux-x64.AppImage --appimage-extract-and-run
+```
+
+Each Linux release also has a `.zsync` file, so AppImageUpdate and Gear Lever can update the AppImage by downloading only the parts that changed.
 
 Intel Macs and older Linux distributions can run it from source (see below). `SHA256SUMS.txt` in each release lists checksums for every file.
 
@@ -201,7 +211,7 @@ Hoardwatch --check all
 Hoardwatch --check all --scan-only     # update the ledger, download nothing
 ```
 
-The exit code is 0 when everything succeeded and 1 when any item or source failed. Headless mode does not need a display.
+The exit code is 0 when everything succeeded and 1 when any item or source failed. Headless mode does not need a display. On Linux, `Hoardwatch` in these examples means the path to your AppImage, for example `~/Applications/Hoardwatch-linux-x64.AppImage`.
 
 A systemd user timer that checks every archive hourly:
 
@@ -212,7 +222,7 @@ Description=Hoardwatch archive check
 
 [Service]
 Type=oneshot
-ExecStart=%h/Applications/Hoardwatch --check all
+ExecStart=%h/Applications/Hoardwatch-linux-x64.AppImage --check all
 ```
 
 ```ini
@@ -260,7 +270,29 @@ App data (settings, accounts, installed tools, yt-dlp updates):
 | macOS | `~/Library/Application Support/Hoardwatch` |
 | Linux | `$XDG_DATA_HOME/Hoardwatch`, usually `~/.local/share/Hoardwatch` |
 
-**Portable mode**: create a folder named `hoardwatch-data` next to the executable and Hoardwatch keeps everything there instead.
+**Portable mode**: create a folder named `hoardwatch-data` next to the executable (or next to the `.AppImage` file) and Hoardwatch keeps everything there instead.
+
+## Interface
+
+The window has the archive list on the left and, for the selected archive, a header with its folder, totals and last check, then four tabs: Sources, Items, Link grabber and Activity. Right-click an archive, a source or an item for everything you can do with it. Click any column heading to sort by it, click again to reverse.
+
+The Items tab filters as you type. "missed" in the status filter shows items deleted upstream before they were saved.
+
+View > Theme switches between Hoardwatch (the default), Light, Dark, Verdigris, Kawaii Light and Kawaii Dark. The Kawaii themes use a rounded font (M PLUS Rounded 1c, Comfortaa, Nunito, Quicksand or Varela Round) when one is installed and the normal font when not. The window size, the sidebar width and the theme are remembered.
+
+| Shortcut | Action |
+|---|---|
+| Ctrl+N | New archive |
+| Ctrl+O | Open an archive folder |
+| Ctrl+R | Check the selected archive |
+| Ctrl+Shift+S | Scan the selected archive without downloading |
+| Ctrl+Shift+R | Check all archives |
+| Ctrl+Shift+A | Add sources |
+| Ctrl+F | Search items |
+| Ctrl+1 to Ctrl+4 | Switch tabs |
+| Ctrl+, | Settings |
+| F5 | Refresh |
+| Ctrl+Q | Quit |
 
 ## Run from source
 
@@ -279,7 +311,7 @@ If Tk is missing: `sudo zypper install python3-tk` (openSUSE), `sudo apt install
 
 ## Building and releasing
 
-`.github/workflows/build.yml` builds with PyInstaller for Windows x64, Linux x64, Linux arm64 and macOS Apple silicon, runs a smoke test, and publishes a release with checksums.
+`.github/workflows/build.yml` builds with PyInstaller for Windows x64, Linux x64, Linux arm64 and macOS Apple silicon, runs a smoke test, and publishes a release with checksums. On Linux the PyInstaller folder build is wrapped into an AppImage by `packaging/build-appimage.sh`, which uses [appimagetool](https://github.com/AppImage/appimagetool).
 
 From the GitHub website: **Actions > Build and release > Run workflow**, enter a version such as `v1.0.0`, and run. The workflow creates the tag and the release. Leaving the version blank builds the files as downloadable workflow artifacts without publishing a release. Pushing a tag that starts with `v` also triggers a release.
 
@@ -296,12 +328,23 @@ pyinstaller --onefile --windowed --name Hoardwatch --icon assets/icon.png \
 
 On Windows use `;` instead of `:` in `--add-data` and `assets/icon.ico` for `--icon`.
 
+To build the AppImage locally, build a folder instead of a single file, then wrap it:
+
+```bash
+pyinstaller --noconfirm --clean --onedir --windowed --name Hoardwatch --icon assets/icon.png \
+  --add-data "assets/icon.png:assets" --add-data "assets/icon.ico:assets" \
+  --collect-all yt_dlp_ejs hoardwatch.py
+packaging/build-appimage.sh
+```
+
+The script uses `appimagetool` from your PATH, or downloads the current build into `~/.cache/hoardwatch-build` if it is not installed. The AppImage lands in the current folder as `Hoardwatch-linux-x64.AppImage` (or `-arm64`). Run `packaging/build-appimage.sh -h` for the options.
+
 ## Limitations
 
 - Hoardwatch can only record what a site's listing shows. If a platform hides older posts from its listing, those posts can look deleted. The partial-listing guard and the "Mark deleted after" threshold reduce false marks but cannot eliminate them. Treat "deleted upstream" as strong evidence to verify, not proof.
 - Deletion is only detected at check time. Something posted and deleted between two checks is never seen. Check more often (scan-only is cheap) for accounts that delete quickly.
 - Scraping whole profiles is exactly what rate limiters and bot detection look for. Expect to tune delays, use cookies and rotate proxies for Instagram, X and TikTok.
-- Windows and macOS builds are unsigned.
+- Windows and macOS builds are unsigned. The AppImage is not GPG-signed either; check it against `SHA256SUMS.txt`.
 - A yt-dlp update installed through the Tools button uses the Python libraries bundled into the Hoardwatch build. That works unless a future yt-dlp needs a new compiled dependency; in that case, update Hoardwatch itself.
 - Only one check runs at a time. Parallelism happens inside a check.
 

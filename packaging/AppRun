@@ -1,0 +1,4 @@
+#!/bin/sh
+# Entry point inside the AppImage. The AppImage runtime sets APPDIR to the mounted image.
+HERE=${APPDIR:-$(cd "$(dirname "$0")" && pwd)}
+exec "$HERE/usr/lib/hoardwatch/Hoardwatch" "$@"
