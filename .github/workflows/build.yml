@@ -32,6 +32,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install AppImage build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # zsync makes the .zsync file that AppImageUpdate and similar tools use for delta updates.
+          sudo apt-get install -y zsync
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -59,8 +66,9 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then SEP=";"; ICON=assets/icon.ico; else SEP=":"; ICON=assets/icon.png; fi
-          # macOS wants a .app bundle (onedir). Windows and Linux get a single file.
-          if [ "$RUNNER_OS" = "macOS" ]; then MODE="--onedir"; else MODE="--onefile"; fi
+          # macOS wants a .app bundle and the AppImage wraps a folder, so both use onedir.
+          # Windows gets a single .exe.
+          if [ "$RUNNER_OS" = "Windows" ]; then MODE="--onefile"; else MODE="--onedir"; fi
           pyinstaller --noconfirm --clean $MODE --windowed --name Hoardwatch \
             --icon "$ICON" \
             --add-data "assets/icon.png${SEP}assets" \
@@ -69,11 +77,25 @@ jobs:
             --osx-bundle-identifier io.github.nullangst.hoardwatch \
             hoardwatch.py
 
+      - name: Build AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          FILE="Hoardwatch-${{ matrix.name }}.AppImage"
+          packaging/build-appimage.sh -d dist/Hoardwatch -o "out/$FILE" \
+            -u "gh-releases-zsync|$OWNER|$REPO|latest|$FILE.zsync"
+
       - name: Smoke test
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then BIN=dist/Hoardwatch.app/Contents/MacOS/Hoardwatch; else BIN=dist/Hoardwatch; fi
+          case "$RUNNER_OS" in
+            macOS) BIN=dist/Hoardwatch.app/Contents/MacOS/Hoardwatch ;;
+            # Runners have no FUSE, so let the AppImage extract itself and run from there.
+            Linux) BIN="out/Hoardwatch-${{ matrix.name }}.AppImage"; export APPIMAGE_EXTRACT_AND_RUN=1 ;;
+          esac
           "$BIN" --version
           # --list loads yt-dlp, so this fails if it was not bundled correctly.
           "$BIN" --list
@@ -84,7 +106,7 @@ jobs:
           mkdir -p out
           case "$RUNNER_OS" in
             Windows) cp dist/Hoardwatch.exe "out/Hoardwatch-${{ matrix.name }}.exe" ;;
-            Linux)   tar -czf "out/Hoardwatch-${{ matrix.name }}.tar.gz" -C dist Hoardwatch ;;
+            Linux)   ;;  # the AppImage and its .zsync are already in out/
             macOS)   ditto -c -k --keepParent dist/Hoardwatch.app "out/Hoardwatch-${{ matrix.name }}.zip" ;;
           esac
           ls -la out
@@ -109,7 +131,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum * > SHA256SUMS.txt
+          sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
