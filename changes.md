@@ -23,5 +23,6 @@
 * Log is monospaced, has a horizontal scrollbar, Wrap lines and Copy all, and stops jumping to the bottom while you scroll back.
 * Enter submits dialogs, Escape cancels.
 * Fixed the checksum step's glob in the release job (shellcheck SC2035).
+* The workflow runs `packaging/build-appimage.sh` through bash, since files uploaded through GitHub's website lose their executable bit.
 
 Reasons for changes: Linux users get a single file that runs on any distribution with glibc 2.35 or newer and integrates with AppImage tools. The UI needed less hunting: actions were only reachable from one place, empty tables gave no hint what to do next, and there was no way to sort or see what an archive's state was at a glance.

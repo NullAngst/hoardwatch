@@ -334,10 +334,10 @@ To build the AppImage locally, build a folder instead of a single file, then wra
 pyinstaller --noconfirm --clean --onedir --windowed --name Hoardwatch --icon assets/icon.png \
   --add-data "assets/icon.png:assets" --add-data "assets/icon.ico:assets" \
   --collect-all yt_dlp_ejs hoardwatch.py
-packaging/build-appimage.sh
+bash packaging/build-appimage.sh
 ```
 
-The script uses `appimagetool` from your PATH, or downloads the current build into `~/.cache/hoardwatch-build` if it is not installed. The AppImage lands in the current folder as `Hoardwatch-linux-x64.AppImage` (or `-arm64`). Run `packaging/build-appimage.sh -h` for the options.
+The script uses `appimagetool` from your PATH, or downloads the current build into `~/.cache/hoardwatch-build` if it is not installed. The AppImage lands in the current folder as `Hoardwatch-linux-x64.AppImage` (or `-arm64`). Run `bash packaging/build-appimage.sh -h` for the options.
 
 ## Limitations
 
