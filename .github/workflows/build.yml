@@ -84,7 +84,8 @@ jobs:
           OWNER="${GITHUB_REPOSITORY%%/*}"
           REPO="${GITHUB_REPOSITORY#*/}"
           FILE="Hoardwatch-${{ matrix.name }}.AppImage"
-          packaging/build-appimage.sh -d dist/Hoardwatch -o "out/$FILE" \
+          # Run through bash so it works even if the file lost its executable bit (web uploads drop it).
+          bash packaging/build-appimage.sh -d dist/Hoardwatch -o "out/$FILE" \
             -u "gh-releases-zsync|$OWNER|$REPO|latest|$FILE.zsync"
 
       - name: Smoke test
